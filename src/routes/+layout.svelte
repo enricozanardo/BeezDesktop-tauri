@@ -5,7 +5,7 @@
 	import '#lib/theme.css';
 
 	let { children } = $props();
-	let version = $state('0.1.1');
+	let version = $state('0.1.2');
 
 	const links = [
 		{ href: '/', label: 'Dashboard' },

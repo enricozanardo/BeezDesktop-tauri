@@ -1,16 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Beez Desktop default capabilities",
+  "description": "enables the default permissions",
   "windows": ["main"],
-  "permissions": [
-    "core:default",
-    {
-      "identifier": "allow-sidecar",
-      "allow": [
-        { "name": "app_version" },
-        { "name": "sidecar_call" }
-      ]
-    }
-  ]
+  "permissions": ["core:default"]
 }
