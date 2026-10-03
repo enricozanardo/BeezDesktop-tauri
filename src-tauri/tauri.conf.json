@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Beez Desktop",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "identifier": "io.beez.desktop",
   "build": {
     "frontendDist": "../build",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Beez Desktop v0.1.9",
+        "title": "Beez Desktop v0.1.10",
         "width": 1280,
         "height": 800,
         "resizable": true,
