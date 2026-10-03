@@ -68,7 +68,7 @@ jobs:
             {
               echo "APPLE_API_KEY<<KEY_EOF"
               cat "$KEY_PATH"
-              echo "KEY_EOF"
+              printf '\nKEY_EOF\n'
             } >> "$GITHUB_ENV"
           fi
       - run: npm ci
