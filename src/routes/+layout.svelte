@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import favicon from '#lib/assets/favicon.svg';
-	import { appVersion } from '#lib/sidecar';
+	import { appVersion } from '#lib';
 	import '#lib/theme.css';
 
 	let { children } = $props();
@@ -20,7 +20,7 @@
 	];
 
 	$effect(() => {
-		appVersion().then((v) => {
+		appVersion().then((v: string) => {
 			version = v;
 			if (typeof document !== 'undefined') {
 				document.title = `Beez Desktop v${v}`;

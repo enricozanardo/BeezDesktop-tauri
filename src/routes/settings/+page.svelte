@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { sidecarCall } from '#lib/sidecar';
+	import { sidecarCall } from '#lib';
 	let cfg = $state('');
 
 	async function load() {
