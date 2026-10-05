@@ -60,8 +60,8 @@
 
 <h1>Wallet</h1>
 <p class="lead">
-	Generate or import a BIP39 mnemonic. Stored encrypted under BeezDesktopTwo (independent of Toga).
-	If you previously used Toga Beez Desktop on this machine, Two migrates that wallet once on first load.
+	Generate or import a BIP39 mnemonic. Stored encrypted on this machine under BeezDesktopTwo.
+	A wallet previously saved by Toga Beez Desktop is migrated once on first load.
 </p>
 
 <div class="card">

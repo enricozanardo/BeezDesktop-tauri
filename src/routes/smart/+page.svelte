@@ -78,6 +78,19 @@
 		draft = '';
 		await refreshNodes(text);
 		const node = selected || nodes[0];
+		if (node && node.node_id !== 'local_minicpm') {
+			status = 'Preparing embedding model (first run may download it)…';
+			const ready = await sidecarCall('embed_ensure');
+			if (ready.ok === false) {
+				busy = false;
+				messages = [
+					...messages,
+					{ role: 'assistant', content: String(ready.error), error: String(ready.error) }
+				];
+				return;
+			}
+		}
+		status = '';
 		const payload = {
 			node,
 			messages: messages.map((m) => ({ role: m.role, content: m.content })),
@@ -108,6 +121,13 @@
 	async function indexAttach() {
 		if (!attachPath || !selected) return;
 		busy = true;
+		status = 'Preparing embedding model, then indexing…';
+		const ready = await sidecarCall('embed_ensure');
+		if (ready.ok === false) {
+			busy = false;
+			status = String(ready.error);
+			return;
+		}
 		status = 'Indexing file into the selected Smart workspace…';
 		const result = (await sidecarCall('index_file', {
 			path: attachPath,

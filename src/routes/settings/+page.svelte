@@ -12,11 +12,11 @@
 
 <h1>Settings</h1>
 <p class="lead">
-	Network endpoints come from <code>~/.beez</code>. Beez Desktop Two is standalone — install Python
-	deps once with <code>pip install -r sidecar/requirements.txt</code> if Ask/Knowledge report missing client_core.
+	Network endpoints come from <code>~/.beez</code>. The app ships a native Rust core — no Python
+	install is required.
 </p>
 <div class="card">
-	<button class="primary" onclick={load}>Load config & sidecar status</button>
+	<button class="primary" onclick={load}>Load config &amp; core status</button>
 	{#if ping}
 		<pre>{JSON.stringify(ping, null, 2)}</pre>
 	{/if}

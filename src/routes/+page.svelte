@@ -11,9 +11,9 @@
 	async function refresh() {
 		error = '';
 		const ping = await sidecarCall('ping');
-		coreOk = Boolean(ping.client_core);
+		coreOk = ping.ok !== false && Boolean(ping.client_core);
 		if (ping.ok === false) {
-			error = String(ping.error || 'sidecar unavailable');
+			error = String(ping.error || 'native core unavailable');
 			return;
 		}
 		wallet = await sidecarCall('wallet_status');
@@ -34,7 +34,7 @@
 <h1>Home</h1>
 <p class="lead">
 	Beez Desktop Two is a standalone Tokenized Intelligence client. Create a wallet, pick a Smart
-	node, Ask with citations, or browse Knowledge — no Toga Beez Desktop required.
+	node, Ask with citations, or browse Knowledge.
 </p>
 
 <div class="home-grid">
@@ -53,19 +53,15 @@
 	</div>
 
 	<div class="card">
-		<strong>Sidecar</strong>
+		<strong>Core</strong>
 		<p class="meta">
-			Python client_core:
+			Native engine:
 			{#if coreOk === null}…{:else if coreOk}
 				<span class="ok">ready</span>
 			{:else}
-				<span class="bad">missing deps</span>
+				<span class="bad">unavailable</span>
 			{/if}
 		</p>
-		{#if coreOk === false}
-			<pre>./scripts/setup_sidecar.sh
-# or: uv venv .venv && uv pip install -r sidecar/requirements.txt -p .venv/bin/python</pre>
-		{/if}
 		<button class="ghost" onclick={refresh}>Refresh status</button>
 	</div>
 

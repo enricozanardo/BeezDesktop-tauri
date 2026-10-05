@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Beez Desktop Two",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "identifier": "io.beez.desktop",
   "build": {
     "frontendDist": "../build",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Beez Desktop Two v0.1.17",
+        "title": "Beez Desktop Two v0.1.18",
         "width": 1280,
         "height": 800,
         "resizable": true,
@@ -30,8 +30,6 @@
     "publisher": "Enrico Zanardo",
     "copyright": "Copyright (c) 2026 Enrico Zanardo. GNU Affero General Public License v3.",
     "resources": [
-      "../sidecar",
-      "../shared",
       "../LICENSE"
     ],
     "icon": [

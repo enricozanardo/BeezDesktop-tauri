@@ -17,3 +17,11 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run build
+
+  native:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p beez-native
+        working-directory: src-tauri

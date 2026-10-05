@@ -48,6 +48,12 @@
 
 	async function queryListing() {
 		if (!node || !selected || !ask.trim()) return;
+		status = 'Preparing embedding model…';
+		const ready = await sidecarCall('embed_ensure');
+		if (ready.ok === false) {
+			status = String(ready.error);
+			return;
+		}
 		status = 'Pay-per-query on listing…';
 		const r = (await sidecarCall('knowledge_query', {
 			node,
