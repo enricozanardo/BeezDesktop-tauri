@@ -37,12 +37,20 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: npm ci
       - name: Sidecar Python venv
+        shell: bash
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
+          # Windows uv installs under %USERPROFILE%\.local\bin
+          export PATH="$USERPROFILE/.local/bin:$PATH"
           uv venv .venv
-          uv pip install -r sidecar/requirements.txt -p .venv/bin/python
-          PYTHONPATH=. .venv/bin/python -c "import sys; sys.path.insert(0,'sidecar'); import beez_sidecar, json; print(json.dumps(beez_sidecar.handle({'method':'ping'})))"
+          if [[ -x .venv/Scripts/python.exe ]]; then
+            PY=.venv/Scripts/python.exe
+          else
+            PY=.venv/bin/python
+          fi
+          uv pip install -r sidecar/requirements.txt -p "$PY"
+          PYTHONPATH=. "$PY" -c "import sys; sys.path.insert(0,'sidecar'); import beez_sidecar, json; print(json.dumps(beez_sidecar.handle({'method':'ping'})))"
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
