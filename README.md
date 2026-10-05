@@ -2,6 +2,9 @@
 
 Standalone Tokenized Intelligence client (SvelteKit + Tauri 2). **No Toga / BeeWare Beez Desktop dependency.**
 
+Repo: https://github.com/enricozanardo/BeezDesktopTwo  
+Local path (same level as the other Beez* components): `BeezMaster/BeezDesktopTwo/`
+
 ## Features
 
 - Wallet create / import (encrypted local storage `BeezDesktopTwo`)
@@ -12,8 +15,8 @@ Standalone Tokenized Intelligence client (SvelteKit + Tauri 2). **No Toga / BeeW
 ## Dev
 
 ```bash
-uv venv .venv
-uv pip install -r sidecar/requirements.txt -p .venv/bin/python
+cd BeezMaster/BeezDesktopTwo
+./scripts/setup_sidecar.sh
 npm ci
 npm run tauri:dev
 ```

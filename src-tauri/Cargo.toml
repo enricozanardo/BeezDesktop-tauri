@@ -4,7 +4,7 @@ version = "0.1.16"
 description = "Beez Desktop Two (SvelteKit + Tauri)"
 authors = ["Enrico Zanardo"]
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/enricozanardo/BeezDesktop-tauri"
+repository = "https://github.com/enricozanardo/BeezDesktopTwo"
 edition = "2024"
 rust-version = "1.90"
 
