@@ -1,9 +1,9 @@
-# Beez Desktop (Tauri)
+# Beez Desktop Two (Tauri)
 
 SvelteKit UI wrapped by **Tauri 2**, with a **Python sidecar** that reuses
-`client_core` (wallet, AES-256-GCM, ECDH, chunking, ZMQ). This is the
-successor to BeeWare/Toga BeezDesktop; keep shipping Toga `0.6.x` until
-these nine screens have production parity.
+`client_core`. Product name is **Beez Desktop Two**; the GitHub repository
+remains `BeezDesktop-tauri` and the Apple identifier stays `io.beez.desktop`.
+Toga **Beez Desktop** `0.6.x` is the BeeWare client.
 
 ## Screens
 

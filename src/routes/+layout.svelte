@@ -5,13 +5,13 @@
 	import '#lib/theme.css';
 
 	let { children } = $props();
-	let version = $state('0.1.2');
+	let version = $state('0.1.15');
 
 	const links = [
 		{ href: '/', label: 'Dashboard' },
 		{ href: '/wallet', label: 'Wallet' },
 		{ href: '/files', label: 'Files' },
-		{ href: '/smart', label: 'Smart' },
+		{ href: '/smart', label: 'Ask' },
 		{ href: '/knowledge', label: 'Knowledge' },
 		{ href: '/transactions', label: 'Transactions' },
 		{ href: '/blockchain', label: 'Blockchain' },
@@ -23,7 +23,7 @@
 		appVersion().then((v: string) => {
 			version = v;
 			if (typeof document !== 'undefined') {
-				document.title = `Beez Desktop v${v}`;
+				document.title = `Beez Desktop Two v${v}`;
 			}
 		});
 	});
@@ -31,14 +31,14 @@
 
 <svelte:head>
 	<link rel="icon" href={favicon} />
-	<title>Beez Desktop v{version}</title>
+	<title>Beez Desktop Two v{version}</title>
 </svelte:head>
 
 <div class="shell">
 	<aside class="sidebar">
 		<div class="brand">
 			BEEZ
-			<small>Desktop v{version}</small>
+			<small>Desktop Two v{version}</small>
 		</div>
 		<nav>
 			{#each links as link}
