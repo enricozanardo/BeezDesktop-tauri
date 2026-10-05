@@ -5,14 +5,14 @@
 	import '#lib/theme.css';
 
 	let { children } = $props();
-	let version = $state('0.1.15');
+	let version = $state('0.1.16');
 
 	const links = [
-		{ href: '/', label: 'Dashboard' },
-		{ href: '/wallet', label: 'Wallet' },
-		{ href: '/files', label: 'Files' },
+		{ href: '/', label: 'Home' },
 		{ href: '/smart', label: 'Ask' },
 		{ href: '/knowledge', label: 'Knowledge' },
+		{ href: '/wallet', label: 'Wallet' },
+		{ href: '/files', label: 'Files' },
 		{ href: '/transactions', label: 'Transactions' },
 		{ href: '/blockchain', label: 'Blockchain' },
 		{ href: '/network', label: 'Network' },

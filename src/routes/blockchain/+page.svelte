@@ -1,3 +1,5 @@
 <h1>Blockchain</h1>
-<p class="lead">Height, search, paginated blocks, transaction drill-down.</p>
-<div class="card"><p>Not wired yet.</p></div>
+<p class="lead">Chain height and explorer views will use Directory/Chain HTTP from ~/.beez.</p>
+<div class="card">
+	<p>Not wired in this release. Wallet + Ask + Knowledge are the supported path.</p>
+</div>

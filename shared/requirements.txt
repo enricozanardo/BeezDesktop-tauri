@@ -1,0 +1,10 @@
+# Beez shared module dependencies
+cryptography>=42.0.0
+ecdsa>=0.18.0
+mnemonic>=0.20
+base58>=2.1.1
+pyzmq>=25.1.0
+requests>=2.31.0
+toml>=0.10.2
+Pillow>=10.0.0
+pymupdf>=1.24.0

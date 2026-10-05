@@ -12,13 +12,9 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Native-only methods that must not short-circuit Python (wallet / client_core).
 fn native_handle(method: &str) -> Option<Value> {
     match method {
-        "ping" => Some(json!({
-            "ok": true,
-            "sidecar": "native",
-            "client_core": false,
-        })),
         "read_beez_config" => {
             let path = home_dir().join(".beez");
             if path.is_file() {
@@ -63,21 +59,71 @@ fn sidecar_script(app: &AppHandle) -> PathBuf {
     cwd.join("sidecar/beez_sidecar.py")
 }
 
-fn python_commands() -> &'static [&'static str] {
-    if cfg!(windows) {
-        &["python", "py", "python3"]
-    } else {
-        &["python3", "python"]
+fn pythonpath_for(script: &Path) -> String {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(sidecar_dir) = script.parent() {
+        roots.push(sidecar_dir.to_path_buf());
+        if let Some(app_root) = sidecar_dir.parent() {
+            roots.push(app_root.to_path_buf());
+            roots.push(app_root.join("shared").parent().unwrap_or(app_root).to_path_buf());
+        }
+        // Bundled layout: resources/{sidecar,shared}
+        if sidecar_dir.file_name().and_then(|s| s.to_str()) == Some("sidecar") {
+            if let Some(res) = sidecar_dir.parent() {
+                roots.push(res.to_path_buf());
+            }
+        }
     }
+    let mut parts: Vec<String> = roots
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    if let Ok(existing) = std::env::var("PYTHONPATH") {
+        if !existing.is_empty() {
+            parts.push(existing);
+        }
+    }
+    parts.join(if cfg!(windows) { ";" } else { ":" })
+}
+
+fn python_candidates(script: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    // Prefer project / resource .venv next to sidecar or app root
+    if let Some(sidecar_dir) = script.parent() {
+        out.push(sidecar_dir.join(".venv/bin/python"));
+        out.push(sidecar_dir.join(".venv/Scripts/python.exe"));
+        if let Some(root) = sidecar_dir.parent() {
+            out.push(root.join(".venv/bin/python"));
+            out.push(root.join(".venv/Scripts/python.exe"));
+        }
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    out.push(cwd.join(".venv/bin/python"));
+    out.push(cwd.join(".venv/Scripts/python.exe"));
+    if cfg!(windows) {
+        out.push(PathBuf::from("python"));
+        out.push(PathBuf::from("py"));
+        out.push(PathBuf::from("python3"));
+    } else {
+        out.push(PathBuf::from("python3"));
+        out.push(PathBuf::from("python"));
+    }
+    out
 }
 
 fn run_python_sidecar(script: &Path, payload: &str) -> Result<String, String> {
+    let py_path = pythonpath_for(script);
     let mut last_err = String::from("no Python interpreter found");
-    for cmd in python_commands() {
-        let mut command = Command::new(cmd);
-        if *cmd == "py" {
+    for cmd_path in python_candidates(script) {
+        let cmd_display = cmd_path.display().to_string();
+        let mut command = Command::new(&cmd_path);
+        if cmd_path.file_name().and_then(|s| s.to_str()) == Some("py") {
             command.arg("-3");
         }
+        if let Some(dir) = script.parent() {
+            command.current_dir(dir);
+        }
+        command.env("PYTHONPATH", &py_path);
         let spawned = command
             .arg(script)
             .stdin(Stdio::piped())
@@ -87,7 +133,7 @@ fn run_python_sidecar(script: &Path, payload: &str) -> Result<String, String> {
         let mut child = match spawned {
             Ok(child) => child,
             Err(err) => {
-                last_err = format!("{cmd}: {err}");
+                last_err = format!("{cmd_display}: {err}");
                 continue;
             }
         };
@@ -96,13 +142,22 @@ fn run_python_sidecar(script: &Path, payload: &str) -> Result<String, String> {
             writeln!(stdin, "{payload}").map_err(|e| e.to_string())?;
         }
         let stdout = child.stdout.take().ok_or("sidecar stdout closed")?;
+        let stderr = child.stderr.take();
         let mut line = String::new();
         BufReader::new(stdout)
             .read_line(&mut line)
             .map_err(|e| e.to_string())?;
         let status = child.wait().map_err(|e| e.to_string())?;
         if !status.success() {
-            last_err = format!("{cmd} exited {status}");
+            let mut err_txt = String::new();
+            if let Some(err) = stderr {
+                let _ = BufReader::new(err).read_line(&mut err_txt);
+            }
+            last_err = format!("{cmd_display} exited {status}: {err_txt}");
+            continue;
+        }
+        if line.trim().is_empty() {
+            last_err = format!("{cmd_display} returned empty stdout");
             continue;
         }
         return Ok(line.trim().to_string());

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""JSON-line sidecar for Beez Desktop Two.
+"""JSON-line sidecar for Beez Desktop Two (standalone; no Toga Beez Desktop).
 
 Reads one JSON object from stdin (method + optional params) and prints one
 JSON object to stdout.
@@ -11,39 +11,43 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-if str(HERE) not in sys.path:
-    sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+
+
+def _bootstrap_paths() -> None:
+    """Put vendored shared/ and this sidecar dir on sys.path."""
+    for p in (HERE, ROOT):
+        s = str(p)
+        if s not in sys.path:
+            sys.path.insert(0, s)
+    # Prefer vendored shared next to the app (dev + Tauri resources)
+    for shared in (
+        ROOT / "shared",
+        HERE / "shared",
+        Path(sys.prefix) / "shared",
+    ):
+        if shared.is_dir():
+            parent = str(shared.parent)
+            if parent not in sys.path:
+                sys.path.insert(0, parent)
+            break
+
+
+_bootstrap_paths()
 
 
 def _try_import_core():
-    candidates = [
-        Path.home() / "github" / "BeezMaster" / "BeezShared",
-        Path("/home/fucina/github/BeezMaster/BeezShared"),
-        HERE.parent / "shared",
-        Path.home() / "github" / "BeezMaster" / "BeezDesktop" / "shared",
-        Path("/home/fucina/github/BeezMaster/BeezDesktop/shared"),
-        Path("/home/fucina/github/BeezMaster/BeezSmart/shared"),
-    ]
-    for root in candidates:
-        if not root.exists():
-            continue
-        insert = str(root.parent if root.name == "shared" else root)
-        if insert not in sys.path:
-            sys.path.insert(0, insert)
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
+    try:
+        from shared.client_core import BeezClientCore, Wallet  # type: ignore
+
+        return BeezClientCore, Wallet
+    except Exception:
         try:
-            from shared.client_core import BeezClientCore, Wallet  # type: ignore
+            from client_core import BeezClientCore, Wallet  # type: ignore
 
             return BeezClientCore, Wallet
         except Exception:
-            try:
-                from client_core import BeezClientCore, Wallet  # type: ignore
-
-                return BeezClientCore, Wallet
-            except Exception:
-                continue
-    return None, None
+            return None, None
 
 
 def handle(msg: dict) -> dict:
@@ -56,6 +60,8 @@ def handle(msg: dict) -> dict:
             "sidecar": "beez_sidecar",
             "client_core": core is not None,
             "product": "Beez Desktop Two",
+            "shared_root": str(ROOT / "shared"),
+            "python": sys.executable,
         }
     if method == "read_beez_config":
         path = Path.home() / ".beez"
@@ -68,6 +74,10 @@ def handle(msg: dict) -> dict:
     except Exception as exc:
         return {"ok": False, "error": f"sidecar modules failed: {exc}"}
     dispatch = {
+        "wallet_status": ops.wallet_status,
+        "wallet_create": ops.wallet_create,
+        "wallet_import": lambda: ops.wallet_import(params),
+        "wallet_forget": ops.wallet_forget,
         "list_smart_nodes": lambda: ops.list_smart_nodes(),
         "rank_smart_nodes": lambda: ops.rank_smart_nodes(params),
         "chat": lambda: ops.chat(params),

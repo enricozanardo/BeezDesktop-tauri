@@ -1,5 +1,9 @@
 <h1>Files</h1>
-<p class="lead">Full marketplace upload still lives in Toga Beez Desktop. In Two, attach a PDF or text file on Ask to index it into a Smart workspace (AES chunks stay on the selected node).</p>
+<p class="lead">
+	Encrypted marketplace file upload (Storage + DAM escrow) is planned for a later Two release. Today,
+	index PDF/text into a Smart workspace from <a href="/smart">Ask</a> — embeddings stay on the selected
+	Smart node under your wallet key.
+</p>
 <div class="card">
-	<p>Preserve the Toga Files tabs: Upload, My Files, Public, Notifications.</p>
+	<p>Use Ask → attach absolute path → Index into node. Knowledge marketplace listings can reference those file IDs.</p>
 </div>

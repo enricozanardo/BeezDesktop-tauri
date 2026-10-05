@@ -1,31 +1,29 @@
-# Beez Desktop Two (Tauri)
+# Beez Desktop Two
 
-SvelteKit UI wrapped by **Tauri 2**, with a **Python sidecar** that reuses
-`client_core`. Product name is **Beez Desktop Two**; the GitHub repository
-remains `BeezDesktop-tauri` and the Apple identifier stays `io.beez.desktop`.
-Toga **Beez Desktop** `0.6.x` is the BeeWare client.
+Standalone Tokenized Intelligence client (SvelteKit + Tauri 2). **No Toga / BeeWare Beez Desktop dependency.**
 
-## Screens
+## Features
 
-Dashboard, Wallet, Files, Smart, Knowledge, Transactions, Blockchain,
-Network, Settings. Version is shown in the sidebar and the window title.
+- Wallet create / import (encrypted local storage `BeezDesktopTwo`)
+- Ask: specialised Smart nodes, citations, BZT settlement, Local MiniCPM
+- Knowledge marketplace search / query / publish
+- Vendored `shared/` (BeezShared client_core) + Python sidecar
 
-## Develop
+## Dev
 
 ```bash
-cd BeezDesktop-tauri
-npm install
-# optional: git submodule add git@github.com:enricozanardo/BeezShared.git shared
-python3 sidecar/beez_sidecar.py <<< '{"method":"ping"}'
-npm run tauri dev
+uv venv .venv
+uv pip install -r sidecar/requirements.txt -p .venv/bin/python
+npm ci
+npm run tauri:dev
 ```
 
-Requires Rust (`rustup`), Node 22+, WebKitGTK on Linux, and Python 3.11+.
+The Tauri host prefers `.venv/bin/python` next to the project so Ask/Wallet work without system pip.
+
+## Sidecar
+
+The Rust host invokes `sidecar/beez_sidecar.py` with JSON lines. Wallet and Smart/Knowledge ops use the vendored `shared/` tree. Install Python deps once on the machine that runs the app.
 
 ## Release
 
-Push a `v*` tag. GitHub Actions builds Linux, macOS, and Windows artifacts.
-
-## Config
-
-Same `~/.beez` file as Toga BeezDesktop.
+Push a `v*` tag (or run the Release workflow). macOS DMG is notarized in CI.

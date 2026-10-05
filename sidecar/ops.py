@@ -1,8 +1,11 @@
-"""Sidecar operations: wallet, consensus smart list, index, chat, knowledge."""
+"""Sidecar operations: wallet, consensus smart list, index, chat, knowledge.
+
+Standalone Beez Desktop Two — uses vendored shared/ and app name BeezDesktopTwo.
+Optional one-time migration from legacy Toga BeezDesktop wallet storage.
+"""
 
 from __future__ import annotations
 
-import json
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -12,6 +15,10 @@ import requests
 from rank import infer_needed_capabilities, rank_nodes
 import minicpm
 
+# Own storage namespace (not Toga BeezDesktop).
+APP_WALLET_NAME = "BeezDesktopTwo"
+LEGACY_WALLET_NAME = "BeezDesktop"
+
 
 def _import_shared():
     import sys
@@ -19,11 +26,7 @@ def _import_shared():
     here = Path(__file__).resolve().parent
     roots = [
         here.parent / "shared",
-        Path.home() / "github" / "BeezMaster" / "BeezShared",
-        Path("/home/fucina/github/BeezMaster/BeezShared"),
-        Path.home() / "github" / "BeezMaster" / "BeezDesktop" / "shared",
-        Path("/home/fucina/github/BeezMaster/BeezDesktop/shared"),
-        Path("/home/fucina/github/BeezMaster/BeezSmart/shared"),
+        here / "shared",
     ]
     for root in roots:
         if not root.exists():
@@ -34,7 +37,7 @@ def _import_shared():
                 sys.path.insert(0, p)
         try:
             from shared.client_core.wallet_storage import WalletStorage
-            from shared.client_core.wallet import Wallet
+            from shared.client_core.wallet import Wallet, generate_mnemonic
             from shared.client_core.encryption import derive_encryption_key
             from shared.client_core.docker_mapping import (
                 resolve_node_address,
@@ -53,6 +56,7 @@ def _import_shared():
             return {
                 "WalletStorage": WalletStorage,
                 "Wallet": Wallet,
+                "generate_mnemonic": generate_mnemonic,
                 "derive_encryption_key": derive_encryption_key,
                 "resolve_node_address": resolve_node_address,
                 "DOCKER_NODE_MAP": DOCKER_NODE_MAP,
@@ -64,49 +68,46 @@ def _import_shared():
                 "build_knowledge_publish_tx": build_knowledge_publish_tx,
             }
         except Exception:
-            try:
-                from client_core.wallet_storage import WalletStorage
-                from client_core.wallet import Wallet
-                from client_core.encryption import derive_encryption_key
-                from client_core.docker_mapping import resolve_node_address, DOCKER_NODE_MAP
-                from client_core.smart_client import (
-                    SmartNodeClient,
-                    build_smart_index_tx,
-                    build_smart_query_tx,
-                )
-                from client_core.knowledge_client import (
-                    KnowledgeMarketplaceClient,
-                    build_knowledge_query_tx,
-                    build_knowledge_publish_tx,
-                )
-                return {
-                    "WalletStorage": WalletStorage,
-                    "Wallet": Wallet,
-                    "derive_encryption_key": derive_encryption_key,
-                    "resolve_node_address": resolve_node_address,
-                    "DOCKER_NODE_MAP": DOCKER_NODE_MAP,
-                    "SmartNodeClient": SmartNodeClient,
-                    "build_smart_index_tx": build_smart_index_tx,
-                    "build_smart_query_tx": build_smart_query_tx,
-                    "KnowledgeMarketplaceClient": KnowledgeMarketplaceClient,
-                    "build_knowledge_query_tx": build_knowledge_query_tx,
-                    "build_knowledge_publish_tx": build_knowledge_publish_tx,
-                }
-            except Exception:
-                continue
+            continue
     return None
 
 
 SHARED = _import_shared()
 
 
-def _wallet():
+def _storage(app_name: str = APP_WALLET_NAME):
     if not SHARED:
-        raise RuntimeError("client_core is not importable")
-    storage = SHARED["WalletStorage"]("BeezDesktop")
-    loaded = storage.load_wallet()
+        raise RuntimeError(
+            "client_core is not importable. Install sidecar/requirements.txt "
+            "(python3 -m pip install -r sidecar/requirements.txt)."
+        )
+    return SHARED["WalletStorage"](app_name)
+
+
+def _load_wallet_data() -> Optional[Dict[str, Any]]:
+    """Load Two wallet; migrate once from legacy Toga storage if needed."""
+    own = _storage(APP_WALLET_NAME)
+    loaded = own.load_wallet()
+    if loaded:
+        return loaded
+    legacy = _storage(LEGACY_WALLET_NAME)
+    migrated = legacy.load_wallet()
+    if not migrated:
+        return None
+    mnemonic = migrated.get("mnemonic") if isinstance(migrated, dict) else None
+    address = migrated.get("address") if isinstance(migrated, dict) else None
+    if not mnemonic:
+        return None
+    if not address:
+        address = SHARED["Wallet"](mnemonic).address
+    own.save_wallet(mnemonic, address)
+    return {"mnemonic": mnemonic, "address": address, "migrated_from": LEGACY_WALLET_NAME}
+
+
+def _wallet():
+    loaded = _load_wallet_data()
     if not loaded:
-        raise RuntimeError("No wallet on disk. Connect a wallet in Beez Desktop first.")
+        raise RuntimeError("No wallet yet. Create or import one in the Wallet page.")
     mnemonic = loaded.get("mnemonic") if isinstance(loaded, dict) else None
     if not mnemonic:
         raise RuntimeError("Wallet file has no mnemonic")
@@ -121,6 +122,84 @@ def _wallet_keys():
         wallet.get_pubkey_bytes().hex(),
         wallet,
     )
+
+
+def wallet_status() -> Dict[str, Any]:
+    """Return whether a wallet is present and its address (never the mnemonic)."""
+    if not SHARED:
+        return {
+            "ok": False,
+            "error": "client_core is not importable",
+            "has_wallet": False,
+            "hint": "pip install -r sidecar/requirements.txt",
+        }
+    try:
+        loaded = _load_wallet_data()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "has_wallet": False}
+    if not loaded:
+        return {
+            "ok": True,
+            "has_wallet": False,
+            "address": None,
+            "storage": APP_WALLET_NAME,
+        }
+    address = loaded.get("address")
+    if not address and loaded.get("mnemonic"):
+        address = SHARED["Wallet"](loaded["mnemonic"]).address
+    return {
+        "ok": True,
+        "has_wallet": True,
+        "address": address,
+        "storage": APP_WALLET_NAME,
+        "migrated_from": loaded.get("migrated_from"),
+    }
+
+
+def wallet_create() -> Dict[str, Any]:
+    """Generate a new 12-word wallet and persist it under BeezDesktopTwo."""
+    if not SHARED:
+        return {"ok": False, "error": "client_core is not importable"}
+    if _storage(APP_WALLET_NAME).has_saved_wallet():
+        return {
+            "ok": False,
+            "error": "A wallet already exists. Forget it first, or import over after forget.",
+        }
+    mnemonic = SHARED["generate_mnemonic"](128)
+    wallet = SHARED["Wallet"](mnemonic)
+    if not _storage(APP_WALLET_NAME).save_wallet(mnemonic, wallet.address):
+        return {"ok": False, "error": "failed to save wallet"}
+    return {
+        "ok": True,
+        "address": wallet.address,
+        "mnemonic": mnemonic,
+        "storage": APP_WALLET_NAME,
+    }
+
+
+def wallet_import(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Import a mnemonic (12/24 words) into BeezDesktopTwo storage."""
+    if not SHARED:
+        return {"ok": False, "error": "client_core is not importable"}
+    mnemonic = (params.get("mnemonic") or "").strip()
+    words = mnemonic.split()
+    if len(words) not in (12, 24):
+        return {"ok": False, "error": "mnemonic must be 12 or 24 words"}
+    try:
+        wallet = SHARED["Wallet"](mnemonic)
+    except Exception as exc:
+        return {"ok": False, "error": f"invalid mnemonic: {exc}"}
+    if not _storage(APP_WALLET_NAME).save_wallet(mnemonic, wallet.address):
+        return {"ok": False, "error": "failed to save wallet"}
+    return {"ok": True, "address": wallet.address, "storage": APP_WALLET_NAME}
+
+
+def wallet_forget() -> Dict[str, Any]:
+    """Delete the BeezDesktopTwo wallet file (does not touch Toga storage)."""
+    if not SHARED:
+        return {"ok": False, "error": "client_core is not importable"}
+    ok = _storage(APP_WALLET_NAME).delete_wallet()
+    return {"ok": ok, "has_wallet": False, "storage": APP_WALLET_NAME}
 
 
 def _directory_http_urls() -> List[str]:
@@ -409,12 +488,12 @@ def knowledge_search(params: Dict[str, Any]) -> Dict[str, Any]:
 def knowledge_query(params: Dict[str, Any]) -> Dict[str, Any]:
     if not SHARED:
         return {"ok": False, "error": "client_core is not importable"}
-    from shared.client_core.embedding import embed_query
+    from shared.client_core.embedding import EmbeddingEngine
     node = params.get("node") or {}
     address, priv, pub, _wallet_obj = _wallet_keys()
     client = SHARED["KnowledgeMarketplaceClient"](_smart_url(node), timeout=120)
     text = params.get("query_text") or ""
-    vector = embed_query(text)
+    vector = EmbeddingEngine().embed_query(text)
     result = client.query_listing(
         listing_id=params["listing_id"],
         query_text=text,
