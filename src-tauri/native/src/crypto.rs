@@ -18,7 +18,7 @@ pub fn derive_encryption_key(privkey: &[u8; 32]) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-pub fn aes_gcm_encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+pub fn aes_gcm_encrypt_detached(key: &[u8; 32], plaintext: &[u8]) -> Result<(Vec<u8>, [u8; 12]), String> {
     let cipher = Aes256Gcm::new(key.into());
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -26,6 +26,18 @@ pub fn aes_gcm_encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, Stri
     let ct = cipher
         .encrypt(nonce, plaintext)
         .map_err(|e| format!("aes-gcm: {e}"))?;
+    Ok((ct, nonce_bytes))
+}
+
+pub fn aes_gcm_decrypt_detached(key: &[u8; 32], nonce: &[u8; 12], ciphertext: &[u8]) -> Result<Vec<u8>, String> {
+    let cipher = Aes256Gcm::new(key.into());
+    cipher
+        .decrypt(Nonce::from_slice(nonce), ciphertext.as_ref())
+        .map_err(|e| format!("aes-gcm decrypt: {e}"))
+}
+
+pub fn aes_gcm_encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    let (ct, nonce_bytes) = aes_gcm_encrypt_detached(key, plaintext)?;
     let mut out = Vec::with_capacity(12 + ct.len());
     out.extend_from_slice(&nonce_bytes);
     out.extend_from_slice(&ct);
@@ -38,6 +50,14 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 pub fn utc_timestamp() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S.000Z").to_string()
+}
+
+pub fn chain_timestamp() -> String {
+    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC+00:00").to_string()
+}
+
+pub fn unix_nonce() -> i64 {
+    chrono::Utc::now().timestamp()
 }
 
 pub fn sign_der(privkey: &[u8; 32], message: &[u8]) -> Result<Vec<u8>, String> {

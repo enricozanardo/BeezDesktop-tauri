@@ -54,7 +54,7 @@ pub fn get_json_query(
 }
 
 pub fn post_json(url: &str, body: &Value, timeout_secs: u64) -> Result<(u16, Value, String), String> {
-    let resp = client(timeout_secs, 2000)?
+    let resp = client(timeout_secs, 4000)?
         .post(url)
         .json(body)
         .send()
@@ -63,6 +63,24 @@ pub fn post_json(url: &str, body: &Value, timeout_secs: u64) -> Result<(u16, Val
     let text = resp.text().map_err(|e| e.to_string())?;
     let val = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
     Ok((status, val, text))
+}
+
+pub fn get_bytes(url: &str, timeout_secs: u64) -> Result<Vec<u8>, String> {
+    let mut resp = client(timeout_secs, 3000)?
+        .get(url)
+        .send()
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().unwrap_or_default();
+        return Err(format!(
+            "{status}: {}",
+            text.chars().take(200).collect::<String>()
+        ));
+    }
+    let mut buf = Vec::new();
+    resp.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
 }
 
 pub fn get_ok(url: &str, timeout_secs: u64) -> bool {
@@ -87,7 +105,7 @@ where
     let tmp = dest.with_extension("part");
     let mut resp = client(600, 8000)?
         .get(url)
-        .header("User-Agent", "BeezDesktopTwo/0.1.20")
+        .header("User-Agent", "BeezDesktopTwo/0.1.21")
         .send()
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {

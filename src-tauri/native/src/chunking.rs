@@ -104,10 +104,47 @@ fn split_long(text: &str, max_size: usize) -> Vec<String> {
     split_on_words(text, max_size)
 }
 
+fn add_overlap(chunks: Vec<String>, overlap: usize) -> Vec<String> {
+    if overlap == 0 || chunks.len() <= 1 {
+        return chunks;
+    }
+    let mut result = vec![chunks[0].clone()];
+    for i in 1..chunks.len() {
+        let prev = &chunks[i - 1];
+        let mut overlap_text = suffix_on_char_boundary(prev, overlap).to_string();
+        if let Some(idx) = overlap_text.find(' ') {
+            if idx > 0 && overlap_text.is_char_boundary(idx + 1) {
+                overlap_text = overlap_text[idx + 1..].to_string();
+            }
+        }
+        result.push(format!("{} {}", overlap_text, chunks[i]));
+    }
+    result
+}
+
+fn suffix_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut i = s.len().saturating_sub(max_bytes);
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    &s[i..]
+}
+
 fn split_on_words(text: &str, max_size: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
+        if word.len() > max_size {
+            if !current.trim().is_empty() {
+                chunks.push(current.trim().to_string());
+                current.clear();
+            }
+            chunks.extend(split_by_chars(word, max_size));
+            continue;
+        }
         if !current.is_empty() && current.len() + word.len() + 1 > max_size {
             chunks.push(current.trim().to_string());
             current = word.to_string();
@@ -124,26 +161,22 @@ fn split_on_words(text: &str, max_size: usize) -> Vec<String> {
     chunks
 }
 
-fn add_overlap(chunks: Vec<String>, overlap: usize) -> Vec<String> {
-    if overlap == 0 || chunks.len() <= 1 {
-        return chunks;
-    }
-    let mut result = vec![chunks[0].clone()];
-    for i in 1..chunks.len() {
-        let prev = &chunks[i - 1];
-        let mut overlap_text = if prev.len() > overlap {
-            prev[prev.len().saturating_sub(overlap)..].to_string()
-        } else {
-            prev.clone()
-        };
-        if let Some(idx) = overlap_text.find(' ') {
-            if idx > 0 {
-                overlap_text = overlap_text[idx + 1..].to_string();
-            }
+fn split_by_chars(text: &str, max_size: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    for ch in text.chars() {
+        let mut tmp = [0u8; 4];
+        let piece = ch.encode_utf8(&mut tmp);
+        if !buf.is_empty() && buf.len() + piece.len() > max_size {
+            out.push(buf);
+            buf = String::new();
         }
-        result.push(format!("{} {}", overlap_text, chunks[i]));
+        buf.push(ch);
     }
-    result
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -154,5 +187,13 @@ mod tests {
     fn short_text_one_chunk() {
         let c = split_into_rag_chunks("hello world", 800, 100, 50);
         assert_eq!(c, vec!["hello world"]);
+    }
+
+    #[test]
+    fn em_dash_does_not_panic() {
+        let dash = "—";
+        let text = format!("{} {}", "word ".repeat(80), dash.repeat(40));
+        let chunks = split_into_rag_chunks(&text, 80, 30, 10);
+        assert!(!chunks.is_empty());
     }
 }

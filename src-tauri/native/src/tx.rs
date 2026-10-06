@@ -1,16 +1,20 @@
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
-use crate::crypto::{canonicalize_and_sign, py_float_str, sha256_hex, utc_timestamp};
+use crate::crypto::{canonicalize_and_sign, chain_timestamp, py_float_str, sha256_hex, unix_nonce, utc_timestamp};
 use crate::http;
 use crate::nodes::chain_http_urls;
 use crate::wallet::Wallet;
 
 pub fn send_raw_tx(tx: &Value) -> Value {
+    send_raw_tx_timeout(tx, 10)
+}
+
+pub fn send_raw_tx_timeout(tx: &Value, timeout_secs: u64) -> Value {
     let mut last = json!({"error": "no chain node"});
     for base in chain_http_urls() {
         let url = format!("{base}/transactions");
-        match http::post_json(&url, tx, 10) {
+        match http::post_json(&url, tx, timeout_secs) {
             Ok((200, body, _)) => {
                 return json!({"ok": true, "tx_hash": tx.get("tx_hash"), "body": body});
             }
@@ -256,6 +260,92 @@ pub fn build_knowledge_publish_tx(
             "chunk_count",
             "price_per_query",
             "purchase_price",
+            "timestamp",
+            "tx_hash",
+        ],
+    )?;
+    Ok(Value::Object(tx))
+}
+
+pub fn build_upload_tx(
+    wallet: &Wallet,
+    file_id: &str,
+    file_name: &str,
+    file_size: u64,
+    num_chunks: u64,
+    chunk_locations: &Value,
+    backup_chunk_locations: &Value,
+    storage_duration: i64,
+    query_hash: &str,
+    encryption_nonce: &str,
+    guardian_dam_id: Option<&str>,
+    visibility: &str,
+    sell_price: f64,
+    tags: &[String],
+    extension: &str,
+    amount_bzt: f64,
+) -> Result<Value, String> {
+    let timestamp = chain_timestamp();
+    let nonce = unix_nonce();
+    let amount = format!("{amount_bzt:.6} BZT");
+    let guardian = guardian_dam_id.unwrap_or("");
+    let payload = format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        wallet.address, file_id, file_name, amount, storage_duration, guardian, timestamp
+    );
+    let tx_hash = sha256_hex(payload.as_bytes());
+    let mut tx = Map::new();
+    tx.insert("type".into(), json!("upload"));
+    tx.insert("nonce".into(), json!(nonce));
+    tx.insert("uploader".into(), json!(wallet.address));
+    tx.insert("sender".into(), json!(wallet.address));
+    tx.insert("amount".into(), json!(amount));
+    tx.insert("file_id".into(), json!(file_id));
+    tx.insert("file_name".into(), json!(file_name));
+    tx.insert("file_size".into(), json!(file_size));
+    tx.insert("num_chunks".into(), json!(num_chunks));
+    tx.insert("chunk_locations".into(), chunk_locations.clone());
+    tx.insert("backup_chunk_locations".into(), backup_chunk_locations.clone());
+    tx.insert("storage_duration".into(), json!(storage_duration));
+    tx.insert("query_hash".into(), json!(query_hash));
+    tx.insert("encryption_nonce".into(), json!(encryption_nonce));
+    tx.insert("visibility".into(), json!(visibility));
+    tx.insert("timestamp".into(), json!(timestamp));
+    tx.insert("tx_hash".into(), json!(tx_hash));
+    if !guardian.is_empty() {
+        tx.insert("guardian_dam_id".into(), json!(guardian));
+    }
+    if !extension.is_empty() {
+        tx.insert("extension".into(), json!(extension));
+    }
+    if sell_price > 0.0 {
+        let price_str = format!("{sell_price:.6} BZT");
+        tx.insert("new_price".into(), json!(price_str.clone()));
+        tx.insert("marketplace_price".into(), json!(price_str));
+    }
+    if !tags.is_empty() {
+        tx.insert("tags".into(), json!(tags));
+    }
+    let pubhex = wallet.pubkey_hex()?;
+    canonicalize_and_sign(
+        &mut tx,
+        &wallet.privkey,
+        &pubhex,
+        &[
+            "type",
+            "nonce",
+            "amount",
+            "uploader",
+            "file_id",
+            "file_name",
+            "file_size",
+            "num_chunks",
+            "chunk_locations",
+            "backup_chunk_locations",
+            "storage_duration",
+            "query_hash",
+            "encryption_nonce",
+            "guardian_dam_id",
             "timestamp",
             "tx_hash",
         ],

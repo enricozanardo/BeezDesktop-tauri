@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use crate::chain;
 use crate::chats;
 use crate::embed;
+use crate::files;
 use crate::minicpm;
 use crate::nodes::{list_all_nodes, list_smart_nodes};
 use crate::ops;
@@ -29,6 +30,10 @@ pub fn handle(payload: &str) -> Value {
         "chats_list" => chats::list(),
         "chats_save" => chats::save(&params),
         "chats_delete" => chats::delete(&params),
+        "asset_upload" => files::upload(&params),
+        "asset_upload_estimate" => files::estimate(&params),
+        "asset_list" => files::list_mine(),
+        "asset_download" => files::download(&params),
         "knowledge_search" => ops::knowledge_search(&params),
         "knowledge_query" => ops::knowledge_query(&params),
         "knowledge_publish" => ops::knowledge_publish(&params),

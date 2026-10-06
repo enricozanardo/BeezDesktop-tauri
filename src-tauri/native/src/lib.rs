@@ -4,6 +4,7 @@ mod chunking;
 mod crypto;
 mod dispatch;
 mod embed;
+mod files;
 mod http;
 mod minicpm;
 mod nodes;

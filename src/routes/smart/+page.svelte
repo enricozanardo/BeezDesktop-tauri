@@ -379,8 +379,9 @@
 <h1>Ask</h1>
 <p class="lead">
 	1) Create a wallet. 2) Pick a live Smart node, or install Local MiniCPM (runtime + model) here. 3)
-	Optionally index a PDF/text into that node’s private workspace. 4) Send a question — network answers
-	settle in BZT on-chain. Local MiniCPM is free and does not index the network.
+	Optionally index a PDF/text into that node’s private workspace (RAG only — it does not store the
+	file on Storage/DAM). To keep the original encrypted bytes on-chain, use Files → Upload first. 4)
+	Send a question — network answers settle in BZT. Local MiniCPM is free.
 </p>
 
 <div class="ask-shell">
