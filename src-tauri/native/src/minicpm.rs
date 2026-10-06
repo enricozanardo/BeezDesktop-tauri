@@ -1,9 +1,12 @@
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
 
+use flate2::read::GzDecoder;
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
+use tar::Archive;
 
 use crate::http;
 use crate::paths::models_dir;
@@ -11,6 +14,7 @@ use crate::paths::models_dir;
 pub const PORT: u16 = 18080;
 const HF_GGUF: &str =
     "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/main/MiniCPM5-2B-Q4_K_M.gguf";
+const LLAMA_TAG: &str = "b9571";
 
 struct DownloadState {
     active: bool,
@@ -20,41 +24,71 @@ struct DownloadState {
     total: Option<u64>,
 }
 
-static DOWNLOAD: Lazy<Mutex<DownloadState>> = Lazy::new(|| {
-    Mutex::new(DownloadState {
+fn empty_state() -> DownloadState {
+    DownloadState {
         active: false,
         done: false,
         error: None,
         bytes: 0,
         total: None,
-    })
-});
+    }
+}
 
-fn gguf_path() -> std::path::PathBuf {
+static DOWNLOAD: Lazy<Mutex<DownloadState>> = Lazy::new(|| Mutex::new(empty_state()));
+static RUNTIME: Lazy<Mutex<DownloadState>> = Lazy::new(|| Mutex::new(empty_state()));
+
+fn gguf_path() -> PathBuf {
     if let Ok(named) = std::env::var("BEEZ_MINICPM_GGUF") {
-        return std::path::PathBuf::from(named);
+        return PathBuf::from(named);
     }
     models_dir().join("MiniCPM5-2B-Q4_K_M.gguf")
 }
 
+fn llama_names() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["llama-server.exe"]
+    } else {
+        &["llama-server"]
+    }
+}
+
+fn find_named_binary(dir: &Path, names: &[&str]) -> Option<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_named_binary(&path, names) {
+                return Some(found);
+            }
+        } else if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+            if names.iter().any(|n| *n == name) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 fn llama_bin() -> Option<String> {
+    let runtime = models_dir().join("llama-runtime");
+    if let Some(p) = find_named_binary(&runtime, llama_names()) {
+        return Some(p.display().to_string());
+    }
+    for name in llama_names() {
+        let local = models_dir().join(name);
+        if local.is_file() {
+            return Some(local.display().to_string());
+        }
+    }
     which::which("llama-server")
         .ok()
         .map(|p| p.display().to_string())
-        .or_else(|| {
-            let name = if cfg!(windows) {
-                "llama-server.exe"
-            } else {
-                "llama-server"
-            };
-            let local = models_dir().join(name);
-            local.is_file().then(|| local.display().to_string())
-        })
 }
 
-fn download_snapshot() -> Value {
-    let st = DOWNLOAD.lock().ok();
-    match st {
+fn snapshot(lock: &Lazy<Mutex<DownloadState>>) -> Value {
+    match lock.lock().ok() {
         Some(s) => json!({
             "active": s.active,
             "done": s.done,
@@ -64,6 +98,24 @@ fn download_snapshot() -> Value {
         }),
         None => json!({}),
     }
+}
+
+fn runtime_asset() -> Result<(String, String), String> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let name = match (os, arch) {
+        ("macos", "aarch64") => format!("llama-{LLAMA_TAG}-bin-macos-arm64.tar.gz"),
+        ("macos", "x86_64") => format!("llama-{LLAMA_TAG}-bin-macos-x64.tar.gz"),
+        ("linux", "aarch64") => format!("llama-{LLAMA_TAG}-bin-ubuntu-arm64.tar.gz"),
+        ("linux", _) => format!("llama-{LLAMA_TAG}-bin-ubuntu-x64.tar.gz"),
+        ("windows", "aarch64") => format!("llama-{LLAMA_TAG}-bin-win-cpu-arm64.zip"),
+        ("windows", _) => format!("llama-{LLAMA_TAG}-bin-win-cpu-x64.zip"),
+        _ => return Err(format!("no llama.cpp build for {os}/{arch}")),
+    };
+    let url = format!(
+        "https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_TAG}/{name}"
+    );
+    Ok((url, name))
 }
 
 pub fn status() -> Value {
@@ -81,11 +133,13 @@ pub fn status() -> Value {
         "gguf_path": path.display().to_string(),
         "gguf_present": present,
         "llama_server": binary,
+        "llama_tag": LLAMA_TAG,
         "port": PORT,
         "running": running,
         "price_per_query": 0,
         "download_url": HF_GGUF,
-        "download": download_snapshot(),
+        "download": snapshot(&DOWNLOAD),
+        "runtime": snapshot(&RUNTIME),
     })
 }
 
@@ -118,7 +172,7 @@ pub fn download_gguf() -> Value {
             Err(e) => return json!({"ok": false, "error": e.to_string()}),
         };
         if st.active {
-            return json!({"ok": true, "started": false, "already_running": true, "download": download_snapshot()});
+            return json!({"ok": true, "started": false, "already_running": true, "download": snapshot(&DOWNLOAD)});
         }
         let dest = gguf_path();
         if dest.is_file() && dest.metadata().map(|m| m.len() > 1_000_000).unwrap_or(false) {
@@ -158,6 +212,115 @@ pub fn download_gguf() -> Value {
     json!({"ok": true, "started": true, "message": "Download started in the background. Keep the app open."})
 }
 
+fn chmod_exec(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            let mut p = meta.permissions();
+            p.set_mode(p.mode() | 0o755);
+            let _ = fs::set_permissions(path, p);
+        }
+    }
+}
+
+fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
+    let file = fs::File::open(archive).map_err(|e| e.to_string())?;
+    let mut tar = Archive::new(GzDecoder::new(file));
+    tar.unpack(dest).map_err(|e| e.to_string())
+}
+
+fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
+    let file = fs::File::open(archive).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+        let out = dest.join(entry.mangled_name());
+        if entry.is_dir() {
+            fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut outfile = fs::File::create(&out).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Download pinned llama.cpp binaries into the app models folder (background).
+pub fn install_runtime() -> Value {
+    if llama_bin().is_some() {
+        return json!({
+            "ok": true,
+            "already_present": true,
+            "llama_server": llama_bin(),
+            "message": "llama-server is already available."
+        });
+    }
+    {
+        let mut st = match RUNTIME.lock() {
+            Ok(g) => g,
+            Err(e) => return json!({"ok": false, "error": e.to_string()}),
+        };
+        if st.active {
+            return json!({"ok": true, "started": false, "already_running": true, "runtime": snapshot(&RUNTIME)});
+        }
+        st.active = true;
+        st.done = false;
+        st.error = None;
+        st.bytes = 0;
+        st.total = None;
+    }
+    thread::spawn(|| {
+        let result = (|| -> Result<PathBuf, String> {
+            let (url, name) = runtime_asset()?;
+            let models = models_dir();
+            fs::create_dir_all(&models).map_err(|e| e.to_string())?;
+            let archive = models.join(&name);
+            http::download_file_progress(&url, &archive, |bytes, total| {
+                if let Ok(mut st) = RUNTIME.lock() {
+                    st.bytes = bytes;
+                    st.total = total;
+                }
+            })?;
+            let dest = models.join("llama-runtime");
+            let _ = fs::remove_dir_all(&dest);
+            fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+            if name.ends_with(".zip") {
+                extract_zip(&archive, &dest)?;
+            } else {
+                extract_tar_gz(&archive, &dest)?;
+            }
+            let bin = find_named_binary(&dest, llama_names())
+                .ok_or_else(|| "archive did not contain llama-server".to_string())?;
+            chmod_exec(&bin);
+            let _ = fs::remove_file(&archive);
+            Ok(bin)
+        })();
+        if let Ok(mut st) = RUNTIME.lock() {
+            st.active = false;
+            match result {
+                Ok(_) => {
+                    st.done = true;
+                    st.error = None;
+                }
+                Err(e) => {
+                    st.done = false;
+                    st.error = Some(e);
+                }
+            }
+        }
+    });
+    json!({
+        "ok": true,
+        "started": true,
+        "message": "Installing llama-server in the background. Keep the app open.",
+        "tag": LLAMA_TAG,
+    })
+}
+
 pub fn start_server() -> Value {
     let st = status();
     if st.get("running").and_then(|v| v.as_bool()) == Some(true) {
@@ -177,7 +340,7 @@ pub fn start_server() -> Value {
     else {
         return json!({
             "ok": false,
-            "error": "llama-server not found. Place a llama-server binary in the app models folder or on PATH.",
+            "error": "llama-server not found. Use Install local runtime in Ask (no Homebrew required).",
             "status": st
         });
     };

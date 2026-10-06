@@ -87,7 +87,7 @@ where
     let tmp = dest.with_extension("part");
     let mut resp = client(600, 8000)?
         .get(url)
-        .header("User-Agent", "BeezDesktopTwo/0.1.19")
+        .header("User-Agent", "BeezDesktopTwo/0.1.20")
         .send()
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {

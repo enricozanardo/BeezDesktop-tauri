@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::chain;
+use crate::chats;
 use crate::embed;
 use crate::minicpm;
 use crate::nodes::{list_all_nodes, list_smart_nodes};
@@ -23,13 +24,18 @@ pub fn handle(payload: &str) -> Value {
         "rank_smart_nodes" => ops::rank_smart_nodes(&params),
         "chat" => ops::chat(&params),
         "index_file" => ops::index_file(&params),
+        "index_estimate" => ops::index_estimate(&params),
         "workspace_stats" => ops::workspace_stats(&params),
+        "chats_list" => chats::list(),
+        "chats_save" => chats::save(&params),
+        "chats_delete" => chats::delete(&params),
         "knowledge_search" => ops::knowledge_search(&params),
         "knowledge_query" => ops::knowledge_query(&params),
         "knowledge_publish" => ops::knowledge_publish(&params),
         "knowledge_mine" => ops::knowledge_mine(&params),
         "minicpm_status" => minicpm::status(),
         "minicpm_download" => minicpm::download_gguf(),
+        "minicpm_install_runtime" => minicpm::install_runtime(),
         "minicpm_start" => minicpm::start_server(),
         "minicpm_chat" => minicpm::chat(params.get("messages").unwrap_or(&json!([])), 512),
         "blockchain_info" => chain::blockchain_info(),

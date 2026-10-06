@@ -1,4 +1,5 @@
 mod chain;
+mod chats;
 mod chunking;
 mod crypto;
 mod dispatch;

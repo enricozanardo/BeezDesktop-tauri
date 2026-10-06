@@ -137,33 +137,12 @@ fn node_is_local(node: &Value) -> bool {
         || node.get("llm_backend").and_then(|v| v.as_str()) == Some("minicpm_local")
 }
 
-pub fn chat(params: &Value) -> Value {
-    let messages = params.get("messages").cloned().unwrap_or(json!([]));
-    let node = params.get("node").cloned().unwrap_or(json!({}));
-    if node_is_local(&node) || params.get("backend").and_then(|v| v.as_str()) == Some("minicpm_local")
-    {
-        let result = minicpm::chat(&messages, 512);
-        if result.get("ok") != Some(&json!(true)) {
-            return result;
-        }
-        return json!({
-            "ok": true,
-            "answer": result.get("answer"),
-            "sources": [],
-            "cost": 0,
-            "verification": null,
-            "local": true,
-        });
-    }
-    let wallet = match require_wallet() {
-        Ok(w) => w,
-        Err(e) => return json!({"ok": false, "error": e}),
-    };
-    let key = match derive_encryption_key(&wallet.privkey) {
-        Ok(k) => k,
-        Err(e) => return json!({"ok": false, "error": e}),
-    };
-    let last = messages
+fn fail(code: &str, error: impl Into<String>) -> Value {
+    json!({"ok": false, "code": code, "error": error.into()})
+}
+
+fn last_user_text(messages: &Value) -> String {
+    messages
         .as_array()
         .into_iter()
         .flatten()
@@ -171,39 +150,16 @@ pub fn chat(params: &Value) -> Value {
         .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
         .and_then(|m| m.get("content").and_then(|c| c.as_str()))
         .unwrap_or("")
-        .to_string();
-    if let Err(e) = embed::ensure() {
-        return json!({"ok": false, "error": format!("Preparing embedding model: {e}")});
-    }
-    let query_vector = match embed::embed_query(&last) {
-        Ok(v) => v,
-        Err(e) => return json!({"ok": false, "error": e}),
-    };
-    let mut payload = json!({
-        "messages": messages,
-        "query_vector": query_vector,
-        "wallet_address": wallet.address,
-        "decryption_key": STANDARD.encode(key),
-        "top_k": params.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5),
-    });
-    if let Some(ids) = params.get("file_ids") {
-        payload["file_ids"] = ids.clone();
-    }
-    if let Some(tid) = params.get("thread_id") {
-        payload["thread_id"] = tid.clone();
-    }
-    let url = format!("{}/chat", smart_url(&node));
-    let (status, mut result, text) = match http::post_json(&url, &payload, 180) {
-        Ok(t) => t,
-        Err(e) => return json!({"ok": false, "error": e}),
-    };
-    if status != 200 {
-        return json!({"ok": false, "error": format!("smart chat {status}: {}", text.chars().take(400).collect::<String>())});
-    }
-    if let Some(obj) = result.as_object_mut() {
-        obj.insert("ok".into(), json!(true));
-    }
-    let info = http::get_json(&format!("{}/info", smart_url(&node)), 5).unwrap_or(json!({}));
+        .to_string()
+}
+
+fn settle_smart_query(
+    wallet: &Wallet,
+    node: &Value,
+    info: &Value,
+    result: &mut Value,
+    last: &str,
+) {
     let query_hash = result
         .get("query_hash")
         .and_then(|v| v.as_str())
@@ -234,25 +190,132 @@ pub fn chat(params: &Value) -> Value {
         .or_else(|| node.get("wallet_address"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    match build_smart_query_tx(&wallet, &query_hash, &answer_hash, node_id, node_wallet, cost, &file_ids)
+    match build_smart_query_tx(wallet, &query_hash, &answer_hash, node_id, node_wallet, cost, &file_ids)
     {
         Ok(tx) => {
             let tx_info = send_raw_tx(&tx);
-            if tx_info.get("ok") == Some(&json!(true)) {
-                if let Some(obj) = result.as_object_mut() {
-                    obj.insert("tx_hash".into(), tx.get("tx_hash").cloned().unwrap_or(json!(null)));
-                }
-            }
             if let Some(obj) = result.as_object_mut() {
+                if tx_info.get("ok") == Some(&json!(true)) {
+                    obj.insert("tx_hash".into(), tx.get("tx_hash").cloned().unwrap_or(json!(null)));
+                } else {
+                    obj.insert("code".into(), json!("tx_failed"));
+                }
                 obj.insert("tx".into(), tx_info);
             }
         }
         Err(e) => {
             if let Some(obj) = result.as_object_mut() {
+                obj.insert("code".into(), json!("tx_failed"));
                 obj.insert("tx".into(), json!({"ok": false, "error": e}));
             }
         }
     }
+}
+
+pub fn chat(params: &Value) -> Value {
+    let messages = params.get("messages").cloned().unwrap_or(json!([]));
+    let node = params.get("node").cloned().unwrap_or(json!({}));
+    if node_is_local(&node) || params.get("backend").and_then(|v| v.as_str()) == Some("minicpm_local")
+    {
+        let result = minicpm::chat(&messages, 512);
+        if result.get("ok") != Some(&json!(true)) {
+            return result;
+        }
+        return json!({
+            "ok": true,
+            "answer": result.get("answer"),
+            "sources": [],
+            "cost": 0,
+            "estimated_cost": 0,
+            "verification": null,
+            "local": true,
+        });
+    }
+    let wallet = match require_wallet() {
+        Ok(w) => w,
+        Err(e) => return fail("no_wallet", e),
+    };
+    let key = match derive_encryption_key(&wallet.privkey) {
+        Ok(k) => k,
+        Err(e) => return fail("crypto", e),
+    };
+    let last = last_user_text(&messages);
+    if last.trim().is_empty() {
+        return fail("empty_query", "Type a question before sending.");
+    }
+    if let Err(e) = embed::ensure() {
+        return fail("embed_failed", format!("Preparing embedding model: {e}"));
+    }
+    let query_vector = match embed::embed_query(&last) {
+        Ok(v) => v,
+        Err(e) => return fail("embed_failed", e),
+    };
+    let base = smart_url(&node);
+    let info = match http::get_json_connect(&format!("{base}/info"), 6, 1200) {
+        Ok(v) => v,
+        Err(e) => return fail("node_unreachable", format!("{base}: {e}")),
+    };
+    let estimated = info
+        .get("price_per_query")
+        .or_else(|| node.get("price_per_query"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let mut chat_payload = json!({
+        "messages": messages,
+        "query_vector": query_vector,
+        "wallet_address": wallet.address,
+        "decryption_key": STANDARD.encode(&key),
+        "top_k": params.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5),
+    });
+    if let Some(ids) = params.get("file_ids") {
+        chat_payload["file_ids"] = ids.clone();
+    }
+    if let Some(tid) = params.get("thread_id") {
+        chat_payload["thread_id"] = tid.clone();
+    }
+    let mut used = "chat";
+    let (status, mut result, text) = match http::post_json(&format!("{base}/chat"), &chat_payload, 180) {
+        Ok(t) => t,
+        Err(e) => return fail("node_unreachable", e),
+    };
+    if status != 200 {
+        if status == 404 || status == 405 || status == 501 {
+            used = "query";
+            let query_payload = json!({
+                "query_text": last,
+                "query_vector": query_vector,
+                "wallet_address": wallet.address,
+                "decryption_key": STANDARD.encode(&key),
+                "top_k": params.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5),
+                "file_ids": params.get("file_ids").cloned().unwrap_or(json!(null)),
+            });
+            match http::post_json(&format!("{base}/query"), &query_payload, 180) {
+                Ok((200, body, _)) => result = body,
+                Ok((st, _, t2)) => {
+                    return fail(
+                        "smart_http",
+                        format!("smart query {st}: {}", t2.chars().take(400).collect::<String>()),
+                    );
+                }
+                Err(e) => return fail("node_unreachable", e),
+            }
+        } else {
+            return fail(
+                "smart_http",
+                format!("smart chat {status}: {}", text.chars().take(400).collect::<String>()),
+            );
+        }
+    }
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("ok".into(), json!(true));
+        obj.insert("endpoint".into(), json!(used));
+        obj.insert("estimated_cost".into(), json!(estimated));
+        obj.insert("http_url".into(), json!(base));
+        if obj.get("no_relevant_data").and_then(|v| v.as_bool()) == Some(true) {
+            obj.insert("code".into(), json!("empty_workspace"));
+        }
+    }
+    settle_smart_query(&wallet, &node, &info, &mut result, &last);
     result
 }
 
@@ -267,21 +330,21 @@ pub fn index_file(params: &Value) -> Value {
     }
     let text = match read_text(&path) {
         Ok(t) => t,
-        Err(e) => return json!({"ok": false, "error": e}),
+        Err(e) => return fail("extract", e),
     };
     if text.trim().is_empty() {
-        return json!({"ok": false, "error": "no extractable text"});
+        return fail("extract", "no extractable text");
     }
     let wallet = match require_wallet() {
         Ok(w) => w,
-        Err(e) => return json!({"ok": false, "error": e}),
+        Err(e) => return fail("no_wallet", e),
     };
     let key = match derive_encryption_key(&wallet.privkey) {
         Ok(k) => k,
-        Err(e) => return json!({"ok": false, "error": e}),
+        Err(e) => return fail("crypto", e),
     };
     if let Err(e) = embed::ensure() {
-        return json!({"ok": false, "error": e});
+        return fail("embed_failed", e);
     }
     let chunks = split_into_rag_chunks(&text, 800, 100, 50);
     if chunks.is_empty() {
@@ -344,7 +407,34 @@ pub fn index_file(params: &Value) -> Value {
             tx_hash = tx.get("tx_hash").cloned().unwrap_or(json!(null));
         }
     }
-    json!({"ok": true, "file_id": file_id, "result": result, "tx": tx_info, "tx_hash": tx_hash})
+    json!({"ok": true, "file_id": file_id, "result": result, "tx": tx_info, "tx_hash": tx_hash, "cost": cost, "chunks": num})
+}
+
+pub fn index_estimate(params: &Value) -> Value {
+    let path = PathBuf::from(params.get("path").and_then(|v| v.as_str()).unwrap_or(""));
+    if !path.is_file() {
+        return fail("file_not_found", format!("file not found: {}", path.display()));
+    }
+    let node = params.get("node").cloned().unwrap_or(json!({}));
+    if node_is_local(&node) {
+        return fail("local_no_index", "Local MiniCPM does not index network workspaces");
+    }
+    let text = match read_text(&path) {
+        Ok(t) => t,
+        Err(e) => return fail("extract", e),
+    };
+    let chunks = split_into_rag_chunks(&text, 800, 100, 50);
+    let price = node
+        .get("price_per_embedding")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    json!({
+        "ok": true,
+        "chunks": chunks.len(),
+        "price_per_embedding": price,
+        "estimated_cost": price * chunks.len() as f64,
+        "file_name": path.file_name().and_then(|s| s.to_str()),
+    })
 }
 
 fn read_text(path: &PathBuf) -> Result<String, String> {

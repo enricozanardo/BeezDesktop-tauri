@@ -51,31 +51,33 @@ pub fn is_public_ip_or_hostname(node_ip: &str) -> bool {
     node_ip.contains('.')
 }
 
+pub fn is_compose_hostname(node_ip: &str) -> bool {
+    let key = node_ip.to_lowercase();
+    Regex::new(r"^(chain|storage|dam|directory|smart)[_-]?(\d+)$")
+        .unwrap()
+        .is_match(&key)
+}
+
 pub fn resolve_node_address(node_ip: &str) -> (String, u16) {
-    if is_public_ip_or_hostname(node_ip) {
-        return (node_ip.to_string(), 5000);
+    let trimmed = node_ip.trim();
+    if trimmed.is_empty() {
+        return ("127.0.0.1".into(), 5000);
     }
-    let node_key = node_ip.to_lowercase().replace(['-', '_'], "");
-    for (key, host, port) in DOCKER_NODE_MAP {
-        if *key == node_key {
-            return ((*host).to_string(), *port);
-        }
+    if trimmed.parse::<IpAddr>().is_ok() {
+        return (trimmed.to_string(), 5000);
     }
-    for (key, host, port) in DOCKER_NODE_MAP {
-        if node_key.contains(key) {
-            return ((*host).to_string(), *port);
-        }
-    }
-    let re = Regex::new(r"(chain|storage|dam|directory|smart)[_-]?(\d+)").unwrap();
-    if let Some(c) = re.captures(&node_key) {
-        let mapped = format!("{}{}", &c[1], &c[2]);
+    if is_compose_hostname(trimmed) {
+        let node_key = trimmed.to_lowercase().replace(['-', '_'], "");
         for (key, host, port) in DOCKER_NODE_MAP {
-            if *key == mapped {
+            if *key == node_key {
                 return ((*host).to_string(), *port);
             }
         }
     }
-    (node_ip.to_string(), 5000)
+    if trimmed.contains('.') {
+        return (trimmed.to_string(), 5000);
+    }
+    (trimmed.to_string(), 5000)
 }
 
 pub fn http_url_for(node_ip: &str) -> String {
@@ -273,9 +275,9 @@ pub fn list_smart_nodes() -> Value {
         if node.get("banned").and_then(|v| v.as_bool()) == Some(true) {
             continue;
         }
-        if node.get("capabilities").is_none() {
-            let url = smart_url(&node);
-            if let Ok(info) = http::get_json_connect(&format!("{url}/info"), 3, 800) {
+        let url = smart_url(&node);
+        match http::get_json_connect(&format!("{url}/info"), 4, 900) {
+            Ok(info) => {
                 if let Some(obj) = node.as_object_mut() {
                     for k in [
                         "capabilities",
@@ -286,14 +288,26 @@ pub fn list_smart_nodes() -> Value {
                         "price_per_embedding",
                         "wallet_address",
                         "node_id",
+                        "models",
                     ] {
                         if let Some(v) = info.get(k) {
                             obj.insert(k.to_string(), v.clone());
                         }
                     }
+                    obj.insert("reachable".into(), json!(true));
+                    obj.insert("http_url".into(), json!(url));
+                    obj.insert("supports_chat".into(), json!(http::get_ok(&format!("{url}/chat"), 2)));
                 }
-            } else if let Some(obj) = node.as_object_mut() {
-                obj.insert("capabilities".into(), json!(["generic"]));
+            }
+            Err(e) => {
+                if let Some(obj) = node.as_object_mut() {
+                    if obj.get("capabilities").is_none() {
+                        obj.insert("capabilities".into(), json!(["generic"]));
+                    }
+                    obj.insert("reachable".into(), json!(false));
+                    obj.insert("reach_error".into(), json!(e));
+                    obj.insert("http_url".into(), json!(url));
+                }
             }
         }
         if let Some(obj) = node.as_object_mut() {
@@ -414,6 +428,19 @@ mod tests {
     #[test]
     fn public_ipv4_passthrough() {
         assert_eq!(resolve_node_address("8.8.8.8"), ("8.8.8.8".into(), 5000));
+    }
+
+    #[test]
+    fn directory_smart_id_is_not_mapped_to_localhost() {
+        assert_eq!(
+            resolve_node_address("smart_2_13e8e7"),
+            ("smart_2_13e8e7".into(), 5000)
+        );
+    }
+
+    #[test]
+    fn private_lan_ip_stays_on_port_5000() {
+        assert_eq!(resolve_node_address("10.0.0.9"), ("10.0.0.9".into(), 5000));
     }
 
     #[test]

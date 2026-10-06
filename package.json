@@ -1,7 +1,7 @@
 {
 	"name": "beezdesktop-two",
 	"private": true,
-	"version": "0.1.19",
+	"version": "0.1.20",
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
@@ -29,6 +29,7 @@
 		"#lib/*": "./src/lib/*"
 	},
 	"dependencies": {
-		"@tauri-apps/api": "^2.12.1"
+		"@tauri-apps/api": "^2.12.1",
+		"@tauri-apps/plugin-dialog": "^2.6.0"
 	}
 }
