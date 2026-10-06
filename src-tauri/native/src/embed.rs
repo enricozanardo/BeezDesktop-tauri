@@ -33,6 +33,9 @@ pub fn ensure() -> Result<(), String> {
     Ok(())
 }
 
+/// Embed texts in small batches so a multi-MB document does not OOM the host.
+const EMBED_BATCH: usize = 16;
+
 pub fn embed_texts(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     if texts.is_empty() {
         return Ok(Vec::new());
@@ -40,9 +43,14 @@ pub fn embed_texts(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     ensure()?;
     let mut guard = ENGINE.lock().map_err(|e| e.to_string())?;
     let model = guard.as_mut().ok_or("embedding engine missing")?;
-    model
-        .embed(texts.to_vec(), None)
-        .map_err(|e| format!("embed: {e}"))
+    let mut out = Vec::with_capacity(texts.len());
+    for batch in texts.chunks(EMBED_BATCH) {
+        let part = model
+            .embed(batch.to_vec(), Some(EMBED_BATCH))
+            .map_err(|e| format!("embed: {e}"))?;
+        out.extend(part);
+    }
+    Ok(out)
 }
 
 pub fn embed_query(query: &str) -> Result<Vec<f32>, String> {

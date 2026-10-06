@@ -319,6 +319,19 @@ pub fn chat(params: &Value) -> Value {
     result
 }
 
+/// Soft caps so indexing a PDF does not OOM the desktop (ONNX embeds in tiny batches).
+const MAX_INDEX_CHARS: usize = 250_000;
+const MAX_INDEX_CHUNKS: usize = 400;
+const INDEX_UPLOAD_BATCH: usize = 32;
+
+fn prepare_index_text(mut text: String) -> (String, bool) {
+    let truncated = text.chars().count() > MAX_INDEX_CHARS;
+    if truncated {
+        text = text.chars().take(MAX_INDEX_CHARS).collect();
+    }
+    (text, truncated)
+}
+
 pub fn index_file(params: &Value) -> Value {
     let path = PathBuf::from(params.get("path").and_then(|v| v.as_str()).unwrap_or(""));
     if !path.is_file() {
@@ -328,13 +341,14 @@ pub fn index_file(params: &Value) -> Value {
     if node_is_local(&node) {
         return json!({"ok": false, "error": "Local MiniCPM does not index network workspaces"});
     }
-    let text = match read_text(&path) {
+    let raw = match read_text(&path) {
         Ok(t) => t,
         Err(e) => return fail("extract", e),
     };
-    if text.trim().is_empty() {
+    if raw.trim().is_empty() {
         return fail("extract", "no extractable text");
     }
+    let (text, truncated) = prepare_index_text(raw);
     let wallet = match require_wallet() {
         Ok(w) => w,
         Err(e) => return fail("no_wallet", e),
@@ -346,49 +360,73 @@ pub fn index_file(params: &Value) -> Value {
     if let Err(e) = embed::ensure() {
         return fail("embed_failed", e);
     }
-    let chunks = split_into_rag_chunks(&text, 800, 100, 50);
+    let mut chunks = split_into_rag_chunks(&text, 800, 100, 50);
+    drop(text);
     if chunks.is_empty() {
         return json!({"ok": false, "error": "No text content to index"});
     }
-    let embeddings = match embed::embed_texts(&chunks) {
-        Ok(v) => v,
-        Err(e) => return json!({"ok": false, "error": e}),
-    };
-    let mut encrypted_chunks = Vec::new();
-    for (i, (chunk_text, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
-        let blob = match aes_gcm_encrypt(&key, chunk_text.as_bytes()) {
-            Ok(b) => b,
-            Err(e) => return json!({"ok": false, "error": e}),
-        };
-        encrypted_chunks.push(json!({
-            "chunk_index": i,
-            "embedding": embedding,
-            "encrypted_text": STANDARD.encode(blob),
-            "text_hash": sha256_hex(chunk_text.as_bytes()),
-        }));
+    let chunk_capped = chunks.len() > MAX_INDEX_CHUNKS;
+    if chunk_capped {
+        chunks.truncate(MAX_INDEX_CHUNKS);
     }
     let file_id = params
         .get("file_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let payload = json!({
-        "file_id": file_id,
-        "file_name": path.file_name().and_then(|s| s.to_str()).unwrap_or("file"),
-        "wallet_address": wallet.address,
-        "chunks": encrypted_chunks,
-    });
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file")
+        .to_string();
     let url = format!("{}/index", smart_url(&node));
-    let (status, result, text) = match http::post_json(&url, &payload, 180) {
-        Ok(t) => t,
-        Err(e) => return json!({"ok": false, "error": e}),
-    };
-    if status != 200 {
-        return json!({"ok": false, "error": format!("index {status}: {}", text.chars().take(400).collect::<String>())});
+    let mut total_indexed = 0u64;
+    let mut total_cost = 0.0;
+    let mut last_result = json!({});
+    // Embed + encrypt + upload in small batches so peak RAM stays bounded.
+    for (batch_i, batch) in chunks.chunks(INDEX_UPLOAD_BATCH).enumerate() {
+        let embeddings = match embed::embed_texts(batch) {
+            Ok(v) => v,
+            Err(e) => return fail("embed_failed", e),
+        };
+        let mut encrypted_chunks = Vec::with_capacity(batch.len());
+        let base_idx = batch_i * INDEX_UPLOAD_BATCH;
+        for (j, (chunk_text, embedding)) in batch.iter().zip(embeddings.iter()).enumerate() {
+            let blob = match aes_gcm_encrypt(&key, chunk_text.as_bytes()) {
+                Ok(b) => b,
+                Err(e) => return fail("crypto", e),
+            };
+            encrypted_chunks.push(json!({
+                "chunk_index": base_idx + j,
+                "embedding": embedding,
+                "encrypted_text": STANDARD.encode(blob),
+                "text_hash": sha256_hex(chunk_text.as_bytes()),
+            }));
+        }
+        let payload = json!({
+            "file_id": file_id,
+            "file_name": file_name,
+            "wallet_address": wallet.address,
+            "chunks": encrypted_chunks,
+        });
+        let (status, result, resp_text) = match http::post_json(&url, &payload, 180) {
+            Ok(t) => t,
+            Err(e) => return fail("node_unreachable", e),
+        };
+        if status != 200 {
+            return fail(
+                "smart_http",
+                format!(
+                    "index batch {batch_i} status {status}: {}",
+                    resp_text.chars().take(400).collect::<String>()
+                ),
+            );
+        }
+        total_indexed += result.get("chunks_indexed").and_then(|v| v.as_u64()).unwrap_or(0);
+        total_cost += result.get("total_cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        last_result = result;
     }
     let info = http::get_json(&format!("{}/info", smart_url(&node)), 5).unwrap_or(json!({}));
-    let num = result.get("chunks_indexed").and_then(|v| v.as_u64()).unwrap_or(0);
-    let cost = result.get("total_cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let node_id = info
         .get("node_id")
         .or_else(|| node.get("node_id"))
@@ -401,13 +439,25 @@ pub fn index_file(params: &Value) -> Value {
         .unwrap_or("");
     let mut tx_info = json!(null);
     let mut tx_hash = json!(null);
-    if let Ok(tx) = build_smart_index_tx(&wallet, &file_id, node_id, node_wallet, num, cost) {
+    if let Ok(tx) = build_smart_index_tx(&wallet, &file_id, node_id, node_wallet, total_indexed, total_cost)
+    {
         tx_info = send_raw_tx(&tx);
         if tx_info.get("ok") == Some(&json!(true)) {
             tx_hash = tx.get("tx_hash").cloned().unwrap_or(json!(null));
         }
     }
-    json!({"ok": true, "file_id": file_id, "result": result, "tx": tx_info, "tx_hash": tx_hash, "cost": cost, "chunks": num})
+    json!({
+        "ok": true,
+        "file_id": file_id,
+        "result": last_result,
+        "tx": tx_info,
+        "tx_hash": tx_hash,
+        "cost": total_cost,
+        "chunks": total_indexed,
+        "truncated": truncated,
+        "chunk_capped": chunk_capped,
+        "max_chunks": MAX_INDEX_CHUNKS,
+    })
 }
 
 pub fn index_estimate(params: &Value) -> Value {
@@ -419,11 +469,17 @@ pub fn index_estimate(params: &Value) -> Value {
     if node_is_local(&node) {
         return fail("local_no_index", "Local MiniCPM does not index network workspaces");
     }
-    let text = match read_text(&path) {
+    let raw = match read_text(&path) {
         Ok(t) => t,
         Err(e) => return fail("extract", e),
     };
-    let chunks = split_into_rag_chunks(&text, 800, 100, 50);
+    let (text, truncated) = prepare_index_text(raw);
+    let mut chunks = split_into_rag_chunks(&text, 800, 100, 50);
+    let full_chunks = chunks.len();
+    let chunk_capped = chunks.len() > MAX_INDEX_CHUNKS;
+    if chunk_capped {
+        chunks.truncate(MAX_INDEX_CHUNKS);
+    }
     let price = node
         .get("price_per_embedding")
         .and_then(|v| v.as_f64())
@@ -431,9 +487,19 @@ pub fn index_estimate(params: &Value) -> Value {
     json!({
         "ok": true,
         "chunks": chunks.len(),
+        "chunks_full": full_chunks,
         "price_per_embedding": price,
         "estimated_cost": price * chunks.len() as f64,
         "file_name": path.file_name().and_then(|s| s.to_str()),
+        "truncated": truncated,
+        "chunk_capped": chunk_capped,
+        "max_chunks": MAX_INDEX_CHUNKS,
+        "max_chars": MAX_INDEX_CHARS,
+        "hint": if truncated || chunk_capped {
+            "Large file: only the first part will be indexed for Ask (RAG). Use Files → Upload to store the full encrypted asset."
+        } else {
+            "Indexing embeds text for Ask. General questions do not require indexing."
+        },
     })
 }
 

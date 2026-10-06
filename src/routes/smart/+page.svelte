@@ -301,11 +301,19 @@
 			return;
 		}
 		const cost = Number(est.estimated_cost || 0);
-		if (!confirm(`Index ${est.chunks} chunks at ~${cost} BZT (${est.price_per_embedding} BZT / embedding)?`)) {
+		const note =
+			est.truncated || est.chunk_capped
+				? `\n\nNote: this file is large — only ~${est.chunks} chunks (first ~${est.max_chars} characters) will be indexed for Ask. Full encrypted storage is Files → Upload.`
+				: '';
+		if (
+			!confirm(
+				`Index ${est.chunks} chunks at ~${cost} BZT (${est.price_per_embedding} BZT / embedding)?${note}\n\nYou can Ask general questions without indexing.`
+			)
+		) {
 			return;
 		}
 		busy = true;
-		status = `Indexing (~${cost} BZT)…`;
+		status = `Indexing in small batches (~${cost} BZT)…`;
 		const ready = await sidecarCall('embed_ensure');
 		if (ready.ok === false) {
 			busy = false;
@@ -323,7 +331,11 @@
 		}
 		const fid = String(result.file_id || '');
 		if (fid) fileIds = [...new Set([...fileIds, fid])];
-		status = `Indexed ${fid.slice(0, 8)}… · ${result.chunks ?? (result.result as Record<string, unknown>)?.chunks_indexed} chunks · ${result.cost ?? 0} BZT${result.tx_hash ? ` · tx ${String(result.tx_hash).slice(0, 10)}` : ''}`;
+		const cap =
+			result.truncated || result.chunk_capped
+				? ' · large file capped for Ask'
+				: '';
+		status = `Indexed ${fid.slice(0, 8)}… · ${result.chunks ?? 0} chunks · ${result.cost ?? 0} BZT${result.tx_hash ? ` · tx ${String(result.tx_hash).slice(0, 10)}` : ''}${cap}`;
 		await refreshWorkspace();
 	}
 
@@ -378,10 +390,10 @@
 
 <h1>Ask</h1>
 <p class="lead">
-	1) Create a wallet. 2) Pick a live Smart node, or install Local MiniCPM (runtime + model) here. 3)
-	Optionally index a PDF/text into that node’s private workspace (RAG only — it does not store the
-	file on Storage/DAM). To keep the original encrypted bytes on-chain, use Files → Upload first. 4)
-	Send a question — network answers settle in BZT. Local MiniCPM is free.
+	1) Create a wallet. 2) Pick a Smart node (or Local MiniCPM). 3) Ask anything — the node’s LLM
+	(e.g. GLM) answers general prompts without indexing. 4) Optional: Index a document for
+	document-grounded Q&A (RAG). Large files are capped and embedded in small batches so the PC
+	does not run out of memory. Full encrypted storage is Files → Upload, not Ask Index.
 </p>
 
 <div class="ask-shell">
@@ -473,7 +485,7 @@
 							{/if}
 							{#if m.tx_hash} · settled {m.tx_hash.slice(0, 10)}…{/if}
 							{#if m.code === 'tx_failed'} · answer delivered, settlement failed{/if}
-							{#if m.code === 'empty_workspace'} · no indexed chunks for this wallet{/if}
+							{#if m.code === 'empty_workspace'} · general answer (no matching indexed docs){/if}
 							{#if m.endpoint} · {m.endpoint}{/if}
 							{#if m.sources && m.sources.length} · {m.sources.length} citations{/if}
 						</div>
