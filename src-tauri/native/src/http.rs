@@ -1,29 +1,43 @@
 use reqwest::blocking::Client;
 use serde_json::Value;
+use std::io::{Read, Write};
 use std::time::Duration;
 
-fn client(timeout_secs: u64) -> Result<Client, String> {
+fn client(timeout_secs: u64, connect_ms: u64) -> Result<Client, String> {
     Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_millis(connect_ms))
+        .timeout(Duration::from_secs(timeout_secs.max(1)))
+        .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .map_err(|e| e.to_string())
 }
 
 pub fn get_json(url: &str, timeout_secs: u64) -> Result<Value, String> {
-    let resp = client(timeout_secs)?
+    get_json_connect(url, timeout_secs, 1500)
+}
+
+pub fn get_json_connect(url: &str, timeout_secs: u64, connect_ms: u64) -> Result<Value, String> {
+    let resp = client(timeout_secs, connect_ms)?
         .get(url)
         .send()
         .map_err(|e| e.to_string())?;
     let status = resp.status();
     let text = resp.text().map_err(|e| e.to_string())?;
     if !status.is_success() {
-        return Err(format!("{status}: {}", text.chars().take(400).collect::<String>()));
+        return Err(format!(
+            "{status}: {}",
+            text.chars().take(400).collect::<String>()
+        ));
     }
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
-pub fn get_json_query(url: &str, query: &[(&str, String)], timeout_secs: u64) -> Result<Value, String> {
-    let resp = client(timeout_secs)?
+pub fn get_json_query(
+    url: &str,
+    query: &[(&str, String)],
+    timeout_secs: u64,
+) -> Result<Value, String> {
+    let resp = client(timeout_secs, 1500)?
         .get(url)
         .query(query)
         .send()
@@ -31,13 +45,16 @@ pub fn get_json_query(url: &str, query: &[(&str, String)], timeout_secs: u64) ->
     let status = resp.status();
     let text = resp.text().map_err(|e| e.to_string())?;
     if !status.is_success() {
-        return Err(format!("{status}: {}", text.chars().take(400).collect::<String>()));
+        return Err(format!(
+            "{status}: {}",
+            text.chars().take(400).collect::<String>()
+        ));
     }
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
 pub fn post_json(url: &str, body: &Value, timeout_secs: u64) -> Result<(u16, Value, String), String> {
-    let resp = client(timeout_secs)?
+    let resp = client(timeout_secs, 2000)?
         .post(url)
         .json(body)
         .send()
@@ -49,28 +66,46 @@ pub fn post_json(url: &str, body: &Value, timeout_secs: u64) -> Result<(u16, Val
 }
 
 pub fn get_ok(url: &str, timeout_secs: u64) -> bool {
-    client(timeout_secs)
+    client(timeout_secs, 400)
         .ok()
         .and_then(|c| c.get(url).send().ok())
         .map(|r| r.status().is_success())
         .unwrap_or(false)
 }
 
-pub fn download_file(url: &str, dest: &std::path::Path) -> Result<u64, String> {
+pub fn download_file_progress<F>(
+    url: &str,
+    dest: &std::path::Path,
+    mut on_progress: F,
+) -> Result<u64, String>
+where
+    F: FnMut(u64, Option<u64>),
+{
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let tmp = dest.with_extension("part");
-    let mut resp = client(300)?
+    let mut resp = client(600, 8000)?
         .get(url)
-        .header("User-Agent", "BeezDesktopTwo")
+        .header("User-Agent", "BeezDesktopTwo/0.1.19")
         .send()
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("download {url}: {}", resp.status()));
     }
+    let total = resp.content_length();
     let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    let n = resp.copy_to(&mut file).map_err(|e| e.to_string())?;
+    let mut n = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = resp.read(&mut buf).map_err(|e| e.to_string())?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buf[..read]).map_err(|e| e.to_string())?;
+        n += read as u64;
+        on_progress(n, total);
+    }
     std::fs::rename(&tmp, dest).map_err(|e| e.to_string())?;
     Ok(n)
 }

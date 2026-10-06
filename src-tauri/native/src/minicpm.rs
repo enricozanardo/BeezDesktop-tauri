@@ -1,8 +1,8 @@
 use std::fs;
-use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
 
+use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 
 use crate::http;
@@ -11,6 +11,24 @@ use crate::paths::models_dir;
 pub const PORT: u16 = 18080;
 const HF_GGUF: &str =
     "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/main/MiniCPM5-2B-Q4_K_M.gguf";
+
+struct DownloadState {
+    active: bool,
+    done: bool,
+    error: Option<String>,
+    bytes: u64,
+    total: Option<u64>,
+}
+
+static DOWNLOAD: Lazy<Mutex<DownloadState>> = Lazy::new(|| {
+    Mutex::new(DownloadState {
+        active: false,
+        done: false,
+        error: None,
+        bytes: 0,
+        total: None,
+    })
+});
 
 fn gguf_path() -> std::path::PathBuf {
     if let Ok(named) = std::env::var("BEEZ_MINICPM_GGUF") {
@@ -34,6 +52,20 @@ fn llama_bin() -> Option<String> {
         })
 }
 
+fn download_snapshot() -> Value {
+    let st = DOWNLOAD.lock().ok();
+    match st {
+        Some(s) => json!({
+            "active": s.active,
+            "done": s.done,
+            "error": s.error,
+            "bytes": s.bytes,
+            "total": s.total,
+        }),
+        None => json!({}),
+    }
+}
+
 pub fn status() -> Value {
     let path = gguf_path();
     let binary = llama_bin();
@@ -53,6 +85,7 @@ pub fn status() -> Value {
         "running": running,
         "price_per_query": 0,
         "download_url": HF_GGUF,
+        "download": download_snapshot(),
     })
 }
 
@@ -77,12 +110,52 @@ pub fn local_node() -> Value {
     })
 }
 
+/// Start a background GGUF download and return immediately (does not freeze the UI).
 pub fn download_gguf() -> Value {
-    let dest = gguf_path();
-    match http::download_file(HF_GGUF, &dest) {
-        Ok(n) => json!({"ok": true, "path": dest.display().to_string(), "bytes": n}),
-        Err(e) => json!({"ok": false, "error": format!("download_failed: {e}")}),
+    {
+        let mut st = match DOWNLOAD.lock() {
+            Ok(g) => g,
+            Err(e) => return json!({"ok": false, "error": e.to_string()}),
+        };
+        if st.active {
+            return json!({"ok": true, "started": false, "already_running": true, "download": download_snapshot()});
+        }
+        let dest = gguf_path();
+        if dest.is_file() && dest.metadata().map(|m| m.len() > 1_000_000).unwrap_or(false) {
+            st.done = true;
+            st.bytes = dest.metadata().map(|m| m.len()).unwrap_or(0);
+            return json!({"ok": true, "already_present": true, "path": dest.display().to_string(), "bytes": st.bytes});
+        }
+        st.active = true;
+        st.done = false;
+        st.error = None;
+        st.bytes = 0;
+        st.total = None;
     }
+    thread::spawn(|| {
+        let dest = gguf_path();
+        let result = http::download_file_progress(HF_GGUF, &dest, |bytes, total| {
+            if let Ok(mut st) = DOWNLOAD.lock() {
+                st.bytes = bytes;
+                st.total = total;
+            }
+        });
+        if let Ok(mut st) = DOWNLOAD.lock() {
+            st.active = false;
+            match result {
+                Ok(n) => {
+                    st.done = true;
+                    st.bytes = n;
+                    st.error = None;
+                }
+                Err(e) => {
+                    st.done = false;
+                    st.error = Some(e);
+                }
+            }
+        }
+    });
+    json!({"ok": true, "started": true, "message": "Download started in the background. Keep the app open."})
 }
 
 pub fn start_server() -> Value {
@@ -118,7 +191,7 @@ pub fn start_server() -> Value {
         Ok(f) => f,
         Err(e) => return json!({"ok": false, "error": e.to_string()}),
     };
-    if let Err(e) = Command::new(bin)
+    if let Err(e) = std::process::Command::new(bin)
         .args([
             "-m",
             gguf,
@@ -130,14 +203,14 @@ pub fn start_server() -> Value {
             "8192",
             "--jinja",
         ])
-        .stdout(Stdio::from(logf))
-        .stderr(Stdio::from(errf))
+        .stdout(std::process::Stdio::from(logf))
+        .stderr(std::process::Stdio::from(errf))
         .spawn()
     {
         return json!({"ok": false, "error": e.to_string()});
     }
     for _ in 0..30 {
-        thread::sleep(Duration::from_secs(1));
+        thread::sleep(std::time::Duration::from_secs(1));
         let now = status();
         if now.get("running").and_then(|v| v.as_bool()) == Some(true) {
             return json!({"ok": true, "started": true, "status": now});

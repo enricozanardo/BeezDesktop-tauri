@@ -1,8 +1,9 @@
 use serde_json::{json, Value};
 
+use crate::chain;
 use crate::embed;
 use crate::minicpm;
-use crate::nodes::list_smart_nodes;
+use crate::nodes::{list_all_nodes, list_smart_nodes};
 use crate::ops;
 
 pub fn handle(payload: &str) -> Value {
@@ -16,7 +17,9 @@ pub fn handle(payload: &str) -> Value {
         "wallet_create" => ops::wallet_create(),
         "wallet_import" => ops::wallet_import(&params),
         "wallet_forget" => ops::wallet_forget(),
+        "wallet_ledger" => chain::wallet_ledger(),
         "list_smart_nodes" => list_smart_nodes(),
+        "list_network_nodes" => list_all_nodes(),
         "rank_smart_nodes" => ops::rank_smart_nodes(&params),
         "chat" => ops::chat(&params),
         "index_file" => ops::index_file(&params),
@@ -29,6 +32,8 @@ pub fn handle(payload: &str) -> Value {
         "minicpm_download" => minicpm::download_gguf(),
         "minicpm_start" => minicpm::start_server(),
         "minicpm_chat" => minicpm::chat(params.get("messages").unwrap_or(&json!([])), 512),
+        "blockchain_info" => chain::blockchain_info(),
+        "recent_blocks" => chain::recent_blocks(),
         "embed_status" => embed::status(),
         "embed_ensure" => match embed::ensure() {
             Ok(()) => json!({"ok": true, "ready": true}),

@@ -288,7 +288,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "beez-native"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -315,13 +315,14 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "toml 0.8.2",
  "uuid",
  "which",
 ]
 
 [[package]]
 name = "beezdesktop"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "beez-native",
  "log",

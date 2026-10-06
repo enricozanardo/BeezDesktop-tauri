@@ -3,6 +3,8 @@
 	import { goto } from '$app/navigation';
 
 	let wallet = $state<Record<string, unknown> | null>(null);
+	let ledger = $state<Record<string, unknown> | null>(null);
+	let chain = $state<Record<string, unknown> | null>(null);
 	let nodes = $state<Record<string, unknown>[]>([]);
 	let coreOk = $state<boolean | null>(null);
 	let error = $state('');
@@ -17,6 +19,9 @@
 			return;
 		}
 		wallet = await sidecarCall('wallet_status');
+		ledger = await sidecarCall('wallet_ledger');
+		const info = await sidecarCall('blockchain_info');
+		chain = (info.data as Record<string, unknown>) || null;
 		const listed = await sidecarCall('list_smart_nodes');
 		nodes = ((listed.nodes as Record<string, unknown>[]) || []).slice(0, 6);
 		if (listed.ok === false && !error) {
@@ -42,6 +47,7 @@
 		<strong>Wallet</strong>
 		{#if wallet?.has_wallet}
 			<p class="mono">{String(wallet.address)}</p>
+			<p class="lead">{ledger?.balance ?? '—'} BZT</p>
 			{#if wallet.migrated_from}
 				<p class="meta">Migrated from {String(wallet.migrated_from)} storage.</p>
 			{/if}
@@ -61,6 +67,9 @@
 			{:else}
 				<span class="bad">unavailable</span>
 			{/if}
+		</p>
+		<p class="meta">
+			Height {String((chain?.blockchain as Record<string, unknown> | undefined)?.current_block ?? '—')}
 		</p>
 		<button class="ghost" onclick={refresh}>Refresh status</button>
 	</div>

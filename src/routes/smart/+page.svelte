@@ -33,8 +33,10 @@
 	let fileIds = $state<string[]>([]);
 	let busy = $state(false);
 	let status = $state('');
+	let discoverError = $state('');
 	let threadId = $state<string | undefined>(undefined);
 	let minicpm = $state<Record<string, unknown> | null>(null);
+	let poll: ReturnType<typeof setInterval> | undefined;
 
 	function capList(n: SmartNode): string {
 		const caps = n.capabilities;
@@ -43,18 +45,34 @@
 	}
 
 	async function refreshNodes(prompt = '') {
+		discoverError = '';
 		const ranked = (await sidecarCall('rank_smart_nodes', {
 			prompt,
 			attachments: attachPath ? [attachPath] : []
 		})) as Record<string, unknown>;
 		needed = (ranked.needed as string[]) || [];
 		nodes = (ranked.nodes as SmartNode[]) || [];
+		const errs = ranked.errors as unknown[] | undefined;
+		if ((!nodes || nodes.length === 0) && errs?.length) {
+			discoverError = JSON.stringify(errs);
+		}
 		if (!selected && nodes.length) selected = nodes[0];
 		if (selected) {
 			const match = nodes.find((n) => n.node_id === selected?.node_id);
 			if (match) selected = match;
 		}
 		minicpm = await sidecarCall('minicpm_status');
+	}
+
+	function downloadInfo(): { active?: boolean; bytes?: number; total?: number; error?: string } {
+		const d = minicpm?.download as Record<string, unknown> | undefined;
+		if (!d) return {};
+		return {
+			active: Boolean(d.active),
+			bytes: Number(d.bytes || 0),
+			total: d.total == null ? undefined : Number(d.total),
+			error: d.error ? String(d.error) : undefined
+		};
 	}
 
 	let loaded = $state(false);
@@ -78,7 +96,15 @@
 		draft = '';
 		await refreshNodes(text);
 		const node = selected || nodes[0];
-		if (node && node.node_id !== 'local_minicpm') {
+		if (!node) {
+			busy = false;
+			messages = [
+				...messages,
+				{ role: 'assistant', content: 'No Smart node available yet.', error: 'no node' }
+			];
+			return;
+		}
+		if (node.node_id !== 'local_minicpm') {
 			status = 'Preparing embedding model (first run may download it)…';
 			const ready = await sidecarCall('embed_ensure');
 			if (ready.ok === false) {
@@ -144,16 +170,33 @@
 	}
 
 	async function downloadMini() {
-		status = 'Downloading MiniCPM5-2B GGUF (this is a real Hugging Face fetch)…';
+		status = 'Starting MiniCPM download in the background…';
 		const r = await sidecarCall('minicpm_download');
-		status = JSON.stringify(r);
-		await refreshNodes();
+		status = r.already_present
+			? 'Model already on disk.'
+			: String(r.message || r.error || 'Downloading…');
+		if (poll) clearInterval(poll);
+		poll = setInterval(async () => {
+			minicpm = await sidecarCall('minicpm_status');
+			const d = downloadInfo();
+			if (d.error) {
+				status = `Download failed: ${d.error}`;
+				if (poll) clearInterval(poll);
+			} else if (d.active) {
+				const tot = d.total ? ` / ${(d.total / 1e6).toFixed(0)} MB` : '';
+				status = `Downloading MiniCPM… ${((d.bytes || 0) / 1e6).toFixed(1)} MB${tot}`;
+			} else if (minicpm?.gguf_present) {
+				status = 'MiniCPM GGUF is ready. Click Start local.';
+				if (poll) clearInterval(poll);
+				await refreshNodes();
+			}
+		}, 800);
 	}
 
 	async function startMini() {
 		status = 'Starting llama-server…';
 		const r = await sidecarCall('minicpm_start');
-		status = JSON.stringify(r);
+		status = r.ok === false ? String(r.error) : 'Local MiniCPM is running.';
 		await refreshNodes();
 	}
 </script>
@@ -175,9 +218,13 @@
 			</div>
 		{/if}
 		<button class="ghost" onclick={() => refreshNodes(draft)}>Refresh</button>
+		{#if nodes.length === 0}
+			<p class="meta">Looking up Directory nodes on the live network…</p>
+			{#if discoverError}<pre>{discoverError}</pre>{/if}
+		{/if}
 		{#each nodes as n}
 			<button class="node-card" class:active={selected?.node_id === n.node_id} onclick={() => pick(n)}>
-				<div>{n.label || n.node_id}</div>
+				<div>{n.label || n.node_id || n.ip}</div>
 				<div class="caps">
 					{capList(n)} · {n.price_per_query ?? '?'} BZT
 					{#if n.suitability != null}
@@ -193,7 +240,9 @@
 				{minicpm.running ? 'running' : 'stopped'}
 			</div>
 			<div class="row">
-				<button class="ghost" onclick={downloadMini}>Download model</button>
+				<button class="ghost" onclick={downloadMini} disabled={Boolean(downloadInfo().active)}>
+					{downloadInfo().active ? 'Downloading…' : 'Download model'}
+				</button>
 				<button class="ghost" onclick={startMini}>Start local</button>
 			</div>
 		{/if}
@@ -202,8 +251,8 @@
 		<div class="messages">
 			{#if messages.length === 0}
 				<p class="lead">
-					Ask about your indexed files, attach a PDF/text file to index, then send. Image files need
-					a vision-capable node (MiniCPM5-2B is text-only).
+					Select a Smart node (or Local MiniCPM), optionally index a PDF/text file, then send.
+					The first network Ask downloads the embedding model in-app.
 				</p>
 			{/if}
 			{#each messages as m}

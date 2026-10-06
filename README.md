@@ -24,6 +24,15 @@ npm ci
 npm run tauri:dev
 ```
 
+On Ubuntu/Debian, compiling the Tauri window needs GLib/GTK/WebKit **once** (CI already installs these). If `pkg-config` cannot find `glib-2.0`:
+
+```bash
+./scripts/linux-dev-deps.sh
+npm run tauri:dev
+```
+
+`npm run tauri:dev` also needs a graphical session (`DISPLAY` or `WAYLAND_DISPLAY`). A headless TTY/SSH login will fail at GTK init. GitHub Releases (AppImage/DMG/MSI) are the path for running the app on a desktop.
+
 Native core tests (no GTK required):
 
 ```bash

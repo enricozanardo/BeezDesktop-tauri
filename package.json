@@ -1,14 +1,14 @@
 {
 	"name": "beezdesktop-two",
 	"private": true,
-	"version": "0.1.18",
+	"version": "0.1.19",
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",
 		"tauri": "tauri",
-		"tauri:dev": "tauri dev",
+		"tauri:dev": "node scripts/check-linux-tauri.mjs && tauri dev",
 		"tauri:build": "tauri build",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",

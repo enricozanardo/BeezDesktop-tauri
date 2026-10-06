@@ -127,6 +127,8 @@ pub fn rank_smart_nodes(params: &Value) -> Value {
         "ok": true,
         "needed": infer_needed_capabilities(prompt, &attachments),
         "nodes": ranked,
+        "errors": listed.get("errors"),
+        "source": listed.get("source"),
     })
 }
 

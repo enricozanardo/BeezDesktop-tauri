@@ -5,7 +5,7 @@
 	import '#lib/theme.css';
 
 	let { children } = $props();
-	let version = $state('0.1.18');
+	let version = $state('0.1.19');
 
 	const links = [
 		{ href: '/', label: 'Home' },

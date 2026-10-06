@@ -2,6 +2,7 @@
 	import { sidecarCall } from '#lib';
 
 	let status = $state<Record<string, unknown> | null>(null);
+	let ledger = $state<Record<string, unknown> | null>(null);
 	let mnemonic = $state('');
 	let createdMnemonic = $state('');
 	let message = $state('');
@@ -10,6 +11,7 @@
 
 	async function refresh() {
 		status = await sidecarCall('wallet_status');
+		ledger = await sidecarCall('wallet_ledger');
 	}
 
 	$effect(() => {
@@ -68,7 +70,11 @@
 	<strong>Status</strong>
 	{#if status?.has_wallet}
 		<p class="mono">{String(status.address)}</p>
+		<p class="lead">{ledger?.balance ?? '—'} BZT</p>
 		<p class="meta">Storage: {String(status.storage || 'BeezDesktopTwo')}</p>
+		{#if ledger?.ok === false}
+			<p class="meta" style="color: var(--danger)">{String(ledger.error)}</p>
+		{/if}
 		<button class="ghost" onclick={forget} disabled={busy}>Forget wallet</button>
 	{:else}
 		<p class="meta">No wallet on disk.</p>

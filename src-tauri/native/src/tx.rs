@@ -3,13 +3,13 @@ use uuid::Uuid;
 
 use crate::crypto::{canonicalize_and_sign, py_float_str, sha256_hex, utc_timestamp};
 use crate::http;
-use crate::nodes::{http_url_for, DOCKER_NODE_MAP};
+use crate::nodes::chain_http_urls;
 use crate::wallet::Wallet;
 
 pub fn send_raw_tx(tx: &Value) -> Value {
     let mut last = json!({"error": "no chain node"});
-    for name in ["chain1", "chain2", "chain3"] {
-        let url = format!("{}/transactions", http_url_for(name));
+    for base in chain_http_urls() {
+        let url = format!("{base}/transactions");
         match http::post_json(&url, tx, 10) {
             Ok((200, body, _)) => {
                 return json!({"ok": true, "tx_hash": tx.get("tx_hash"), "body": body});
@@ -20,8 +20,6 @@ pub fn send_raw_tx(tx: &Value) -> Value {
             Err(e) => last = json!({"error": e}),
         }
     }
-    // Also try any mapped host even if compose names failed
-    let _ = DOCKER_NODE_MAP;
     json!({"ok": false, "error": last})
 }
 

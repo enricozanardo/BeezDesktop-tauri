@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Beez Desktop Two",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "identifier": "io.beez.desktop",
   "build": {
     "frontendDist": "../build",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Beez Desktop Two v0.1.18",
+        "title": "Beez Desktop Two v0.1.19",
         "width": 1280,
         "height": 800,
         "resizable": true,
