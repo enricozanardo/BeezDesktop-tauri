@@ -308,6 +308,9 @@ pub fn list_smart_nodes() -> Value {
                         "node_id",
                         "instance_id",
                         "models",
+                        "llm_available",
+                        "llm_unavailable_reason",
+                        "available",
                     ] {
                         if let Some(v) = info.get(k) {
                             obj.insert(k.to_string(), v.clone());
@@ -444,6 +447,12 @@ pub fn rank_nodes(nodes: &[Value], prompt: &str, attachments: &[String]) -> Vec<
             }
             if node.get("banned").and_then(|v| v.as_bool()) == Some(true) {
                 score -= 10.0;
+            }
+            // Provider out of credits / LLM marked unavailable — demote hard.
+            if node.get("llm_available").and_then(|v| v.as_bool()) == Some(false)
+                || node.get("available").and_then(|v| v.as_bool()) == Some(false)
+            {
+                score -= 50.0;
             }
             let price = node
                 .get("price_per_query")

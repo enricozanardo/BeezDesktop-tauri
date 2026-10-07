@@ -13,7 +13,8 @@ use crate::minicpm;
 use crate::nodes::{list_smart_nodes, rank_nodes, smart_url, infer_needed_capabilities};
 use crate::paths::{home_dir, APP_WALLET_NAME};
 use crate::tx::{
-    build_knowledge_publish_tx, build_knowledge_query_tx, build_smart_index_tx, build_smart_query_tx,
+    build_knowledge_publish_tx, build_knowledge_purchase_tx, build_knowledge_query_tx,
+    build_smart_index_tx, build_smart_query_tx,
     send_raw_tx,
 };
 use crate::wallet::Wallet;
@@ -311,11 +312,21 @@ pub fn chat(params: &Value) -> Value {
         obj.insert("endpoint".into(), json!(used));
         obj.insert("estimated_cost".into(), json!(estimated));
         obj.insert("http_url".into(), json!(base));
-        if obj.get("no_relevant_data").and_then(|v| v.as_bool()) == Some(true) {
+        let existing_code = obj.get("code").and_then(|v| v.as_str()).unwrap_or("");
+        if existing_code == "llm_no_credit" {
+            // Provider out of credits — do not bill and keep the friendly code.
+            obj.insert("cost".into(), json!(0.0));
+        } else if obj.get("no_relevant_data").and_then(|v| v.as_bool()) == Some(true)
+            && existing_code.is_empty()
+        {
             obj.insert("code".into(), json!("empty_workspace"));
         }
     }
-    settle_smart_query(&wallet, &node, &info, &mut result, &last);
+    let skip_settle = result.get("code").and_then(|v| v.as_str()) == Some("llm_no_credit")
+        || result.get("llm_available").and_then(|v| v.as_bool()) == Some(false);
+    if !skip_settle {
+        settle_smart_query(&wallet, &node, &info, &mut result, &last);
+    }
     result
 }
 
@@ -632,6 +643,81 @@ pub fn knowledge_query(params: &Value) -> Value {
             if let Some(obj) = result.as_object_mut() {
                 if tx_info.get("ok") == Some(&json!(true)) {
                     obj.insert("tx_hash".into(), tx.get("tx_hash").cloned().unwrap_or(json!(null)));
+                }
+                obj.insert("tx".into(), tx_info);
+            }
+        }
+        Err(e) => {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("tx".into(), json!({"ok": false, "error": e}));
+            }
+        }
+    }
+    result
+}
+
+pub fn knowledge_purchase(params: &Value) -> Value {
+    let wallet = match require_wallet() {
+        Ok(w) => w,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let node = params.get("node").cloned().unwrap_or(json!({}));
+    let listing_id = params.get("listing_id").and_then(|v| v.as_str()).unwrap_or("");
+    if listing_id.is_empty() {
+        return json!({"ok": false, "error": "listing_id required"});
+    }
+    let base = smart_url(&node);
+    let listing = match http::get_json(&format!("{base}/marketplace/listing/{listing_id}"), 8) {
+        Ok(v) => v,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let seller = listing
+        .get("seller_address")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let price = listing
+        .get("purchase_price")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    if price <= 0.0 {
+        return json!({"ok": false, "error": "This listing is not for sale (purchase_price=0)"});
+    }
+    let file_ids: Vec<String> = listing
+        .get("file_ids")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let payload = json!({
+        "listing_id": listing_id,
+        "buyer_address": wallet.address,
+    });
+    let (status, mut result, raw) =
+        match http::post_json(&format!("{base}/marketplace/purchase"), &payload, 60) {
+            Ok(t) => t,
+            Err(e) => return json!({"ok": false, "error": e}),
+        };
+    if status != 200 {
+        return json!({
+            "ok": false,
+            "error": format!("purchase {status}: {}", raw.chars().take(400).collect::<String>())
+        });
+    }
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("ok".into(), json!(true));
+    }
+    match build_knowledge_purchase_tx(&wallet, seller, listing_id, price, &file_ids) {
+        Ok(tx) => {
+            let tx_info = send_raw_tx(&tx);
+            if let Some(obj) = result.as_object_mut() {
+                if tx_info.get("ok") == Some(&json!(true)) {
+                    obj.insert(
+                        "tx_hash".into(),
+                        tx.get("tx_hash").cloned().unwrap_or(json!(null)),
+                    );
                 }
                 obj.insert("tx".into(), tx_info);
             }

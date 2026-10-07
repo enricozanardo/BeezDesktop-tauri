@@ -37,6 +37,7 @@ pub fn handle(payload: &str) -> Value {
         "knowledge_search" => ops::knowledge_search(&params),
         "knowledge_query" => ops::knowledge_query(&params),
         "knowledge_publish" => ops::knowledge_publish(&params),
+        "knowledge_purchase" => ops::knowledge_purchase(&params),
         "knowledge_mine" => ops::knowledge_mine(&params),
         "minicpm_status" => minicpm::status(),
         "minicpm_download" => minicpm::download_gguf(),

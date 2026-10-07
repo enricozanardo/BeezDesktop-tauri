@@ -240,6 +240,12 @@ button.ghost {
 	color: var(--danger);
 }
 
+.listing.active {
+	border-color: var(--gold);
+	box-shadow: inset 3px 0 0 var(--gold);
+	background: var(--bg-card);
+}
+
 .messages {
 	flex: 1;
 	overflow: auto;

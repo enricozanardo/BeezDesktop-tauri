@@ -4,7 +4,7 @@ export async function appVersion(): Promise<string> {
 	try {
 		return await invoke<string>('app_version');
 	} catch {
-		return '0.1.24-web';
+		return '0.1.25-web';
 	}
 }
 

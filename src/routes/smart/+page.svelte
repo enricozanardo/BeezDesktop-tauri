@@ -18,6 +18,9 @@
 		reachable?: boolean;
 		http_url?: string;
 		modalities?: string[];
+		llm_available?: boolean;
+		llm_unavailable_reason?: string;
+		available?: boolean;
 	};
 
 	type ChatMsg = {
@@ -302,7 +305,14 @@
 				verification: (result.verification as Record<string, unknown>) || null,
 				tx_hash: result.tx_hash as string | undefined,
 				local: Boolean(result.local),
-				code: result.code === 'empty_workspace' ? 'empty_workspace' : txFailed ? 'tx_failed' : undefined,
+				code:
+					result.code === 'llm_no_credit'
+						? 'llm_no_credit'
+						: result.code === 'empty_workspace'
+							? 'empty_workspace'
+							: txFailed
+								? 'tx_failed'
+								: undefined,
 				endpoint: result.endpoint as string | undefined,
 				mode: typeof result.mode === 'string' ? result.mode : undefined,
 				error: txFailed ? String((result.tx as Record<string, unknown>)?.error || 'settlement failed') : undefined
@@ -554,6 +564,12 @@
 					· {n.price_per_query ?? 0} BZT / query
 					{#if n.price_per_embedding != null} · {n.price_per_embedding} BZT / embed{/if}
 					{#if n.reachable === false} · unreachable{/if}
+					{#if n.llm_available === false || n.available === false}
+						· LLM unavailable
+						{#if n.llm_unavailable_reason}
+							({String(n.llm_unavailable_reason).slice(0, 48)})
+						{/if}
+					{/if}
 				</div>
 			</button>
 		{/each}
@@ -613,7 +629,9 @@
 							{/if}
 							{#if m.tx_hash} · settled {m.tx_hash.slice(0, 10)}…{/if}
 							{#if m.code === 'tx_failed'} · answer delivered, settlement failed{/if}
-							{#if m.mode === 'general' || m.code === 'empty_workspace'}
+							{#if m.code === 'llm_no_credit'}
+								· provider out of credits — try another node
+							{:else if m.mode === 'general' || m.code === 'empty_workspace'}
 								· general knowledge (no matching indexed docs)
 							{:else if m.mode === 'rag'}
 								· from indexed docs

@@ -267,6 +267,59 @@ pub fn build_knowledge_publish_tx(
     Ok(Value::Object(tx))
 }
 
+pub fn build_knowledge_purchase_tx(
+    wallet: &Wallet,
+    seller_address: &str,
+    listing_id: &str,
+    purchase_price: f64,
+    file_ids: &[String],
+) -> Result<Value, String> {
+    let timestamp = utc_timestamp();
+    let nonce = Uuid::new_v4().to_string();
+    let mut ids: Vec<String> = file_ids.to_vec();
+    ids.sort();
+    let file_ids_str = ids.join(",");
+    // Match BeezShared knowledge_client: raw float str in payload (e.g. "100.0")
+    let payload = format!(
+        "{}|{}|{}|{}|{}|{}",
+        wallet.address,
+        seller_address,
+        listing_id,
+        purchase_price,
+        file_ids_str,
+        timestamp
+    );
+    let tx_hash = sha256_hex(payload.as_bytes());
+    let mut tx = Map::new();
+    tx.insert("type".into(), json!("knowledge_purchase"));
+    tx.insert("nonce".into(), json!(nonce));
+    tx.insert("buyer_address".into(), json!(wallet.address));
+    tx.insert("seller_address".into(), json!(seller_address));
+    tx.insert("listing_id".into(), json!(listing_id));
+    insert_num(&mut tx, "purchase_price", purchase_price);
+    tx.insert("file_ids".into(), json!(ids));
+    tx.insert("timestamp".into(), json!(timestamp));
+    tx.insert("tx_hash".into(), json!(tx_hash));
+    let pubhex = wallet.pubkey_hex()?;
+    canonicalize_and_sign(
+        &mut tx,
+        &wallet.privkey,
+        &pubhex,
+        &[
+            "type",
+            "nonce",
+            "buyer_address",
+            "seller_address",
+            "listing_id",
+            "purchase_price",
+            "file_ids",
+            "timestamp",
+            "tx_hash",
+        ],
+    )?;
+    Ok(Value::Object(tx))
+}
+
 pub fn build_upload_tx(
     wallet: &Wallet,
     file_id: &str,
