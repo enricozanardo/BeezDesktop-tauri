@@ -320,6 +320,221 @@ pub fn build_knowledge_purchase_tx(
     Ok(Value::Object(tx))
 }
 
+fn price_bzt(asking_price: f64) -> String {
+    if asking_price > 0.0 {
+        format!("{asking_price:.6} BZT")
+    } else {
+        "0 BZT".into()
+    }
+}
+
+pub fn build_ownership_request_tx(
+    wallet: &Wallet,
+    file_id: &str,
+    new_owner: &str,
+    asking_price: f64,
+    message: &str,
+    wrapped_file_key: Option<&str>,
+    wrap_nonce: Option<&str>,
+    encryption_nonce: Option<&str>,
+) -> Result<Value, String> {
+    let timestamp = chain_timestamp();
+    let nonce = unix_nonce();
+    let price = price_bzt(asking_price);
+    let payload = format!(
+        "{}|{}|{}|{}|{}",
+        wallet.address, new_owner, file_id, price, timestamp
+    );
+    let tx_hash = sha256_hex(payload.as_bytes());
+    let mut tx = Map::new();
+    tx.insert("type".into(), json!("ownership_request"));
+    tx.insert("nonce".into(), json!(nonce));
+    tx.insert("file_id".into(), json!(file_id));
+    tx.insert("current_owner".into(), json!(wallet.address));
+    tx.insert("new_owner".into(), json!(new_owner));
+    tx.insert("asking_price".into(), json!(price));
+    tx.insert("timestamp".into(), json!(timestamp));
+    tx.insert("tx_hash".into(), json!(tx_hash));
+    if !message.is_empty() {
+        tx.insert("ownership_message".into(), json!(message));
+    }
+    if let Some(k) = wrapped_file_key {
+        tx.insert("wrapped_file_key".into(), json!(k));
+    }
+    if let Some(n) = wrap_nonce {
+        tx.insert("wrap_nonce".into(), json!(n));
+    }
+    if let Some(n) = encryption_nonce {
+        tx.insert("file_encryption_nonce".into(), json!(n));
+    }
+    let pubhex = wallet.pubkey_hex()?;
+    tx.insert("seller_pubkey".into(), json!(pubhex.clone()));
+    canonicalize_and_sign(
+        &mut tx,
+        &wallet.privkey,
+        &pubhex,
+        &[
+            "type",
+            "nonce",
+            "file_id",
+            "current_owner",
+            "new_owner",
+            "asking_price",
+            "ownership_message",
+            "timestamp",
+            "tx_hash",
+        ],
+    )?;
+    Ok(Value::Object(tx))
+}
+
+pub fn build_ownership_accept_tx(
+    wallet: &Wallet,
+    request_id: &str,
+    file_id: &str,
+    new_owner: &str,
+    asking_price: f64,
+    message: &str,
+    current_owner: Option<&str>,
+    wrapped_file_key: Option<&str>,
+    wrap_nonce: Option<&str>,
+    encryption_nonce: Option<&str>,
+) -> Result<Value, String> {
+    let timestamp = chain_timestamp();
+    let nonce = unix_nonce();
+    let price = price_bzt(asking_price);
+    let payload = format!(
+        "{}|{}|{}|{}|{}",
+        new_owner, request_id, file_id, price, timestamp
+    );
+    let tx_hash = sha256_hex(payload.as_bytes());
+    let mut tx = Map::new();
+    tx.insert("type".into(), json!("ownership_accept"));
+    tx.insert("nonce".into(), json!(nonce));
+    tx.insert("request_id".into(), json!(request_id));
+    tx.insert("file_id".into(), json!(file_id));
+    tx.insert("new_owner".into(), json!(new_owner));
+    tx.insert("asking_price".into(), json!(price));
+    tx.insert("timestamp".into(), json!(timestamp));
+    tx.insert("tx_hash".into(), json!(tx_hash));
+    if !message.is_empty() {
+        tx.insert("ownership_message".into(), json!(message));
+    }
+    if let Some(owner) = current_owner {
+        tx.insert("current_owner".into(), json!(owner));
+    }
+    if let Some(k) = wrapped_file_key {
+        tx.insert("wrapped_file_key".into(), json!(k));
+        if let Some(n) = wrap_nonce {
+            tx.insert("wrap_nonce".into(), json!(n));
+        }
+        if let Some(n) = encryption_nonce {
+            tx.insert("file_encryption_nonce".into(), json!(n));
+        }
+        let pubhex = wallet.pubkey_hex()?;
+        tx.insert("seller_pubkey".into(), json!(pubhex));
+    }
+    let pubhex = wallet.pubkey_hex()?;
+    canonicalize_and_sign(
+        &mut tx,
+        &wallet.privkey,
+        &pubhex,
+        &[
+            "type",
+            "nonce",
+            "request_id",
+            "file_id",
+            "new_owner",
+            "asking_price",
+            "ownership_message",
+            "timestamp",
+            "tx_hash",
+        ],
+    )?;
+    Ok(Value::Object(tx))
+}
+
+pub fn build_ownership_reject_tx(
+    wallet: &Wallet,
+    request_id: &str,
+    file_id: &str,
+    message: &str,
+) -> Result<Value, String> {
+    let timestamp = chain_timestamp();
+    let nonce = unix_nonce();
+    let payload = format!(
+        "{}|{}|{}|{}",
+        wallet.address, request_id, file_id, timestamp
+    );
+    let tx_hash = sha256_hex(payload.as_bytes());
+    let mut tx = Map::new();
+    tx.insert("type".into(), json!("ownership_reject"));
+    tx.insert("nonce".into(), json!(nonce));
+    tx.insert("request_id".into(), json!(request_id));
+    tx.insert("file_id".into(), json!(file_id));
+    tx.insert("new_owner".into(), json!(wallet.address));
+    tx.insert("timestamp".into(), json!(timestamp));
+    tx.insert("tx_hash".into(), json!(tx_hash));
+    if !message.is_empty() {
+        tx.insert("ownership_message".into(), json!(message));
+    }
+    let pubhex = wallet.pubkey_hex()?;
+    canonicalize_and_sign(
+        &mut tx,
+        &wallet.privkey,
+        &pubhex,
+        &[
+            "type",
+            "nonce",
+            "request_id",
+            "file_id",
+            "new_owner",
+            "ownership_message",
+            "timestamp",
+            "tx_hash",
+        ],
+    )?;
+    Ok(Value::Object(tx))
+}
+
+pub fn build_ownership_cancel_tx(
+    wallet: &Wallet,
+    request_id: &str,
+    file_id: &str,
+) -> Result<Value, String> {
+    let timestamp = chain_timestamp();
+    let nonce = unix_nonce();
+    let payload = format!(
+        "{}|{}|{}|{}",
+        wallet.address, request_id, file_id, timestamp
+    );
+    let tx_hash = sha256_hex(payload.as_bytes());
+    let mut tx = Map::new();
+    tx.insert("type".into(), json!("ownership_cancel"));
+    tx.insert("nonce".into(), json!(nonce));
+    tx.insert("request_id".into(), json!(request_id));
+    tx.insert("file_id".into(), json!(file_id));
+    tx.insert("current_owner".into(), json!(wallet.address));
+    tx.insert("timestamp".into(), json!(timestamp));
+    tx.insert("tx_hash".into(), json!(tx_hash));
+    let pubhex = wallet.pubkey_hex()?;
+    canonicalize_and_sign(
+        &mut tx,
+        &wallet.privkey,
+        &pubhex,
+        &[
+            "type",
+            "nonce",
+            "request_id",
+            "file_id",
+            "current_owner",
+            "timestamp",
+            "tx_hash",
+        ],
+    )?;
+    Ok(Value::Object(tx))
+}
+
 pub fn build_upload_tx(
     wallet: &Wallet,
     file_id: &str,

@@ -3,18 +3,79 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use hkdf::Hkdf;
 use k256::ecdsa::signature::hazmat::PrehashSigner;
 use k256::ecdsa::{Signature, SigningKey};
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use k256::{PublicKey, SecretKey};
 use rand::RngCore;
 use serde_json::{json, Map, Value};
 use sha1::Sha1;
 use sha2::Sha256;
 
 pub const DOMAIN_FILE_ENC: &[u8] = b"beez-file-enc-v1";
+pub const DOMAIN_ECDH_WRAP: &[u8] = b"beez-ecdh-wrap-v1";
 
 pub fn derive_encryption_key(privkey: &[u8; 32]) -> Result<[u8; 32], String> {
     let hk = Hkdf::<Sha256>::new(None, privkey);
     let mut out = [0u8; 32];
     hk.expand(DOMAIN_FILE_ENC, &mut out)
         .map_err(|e| format!("hkdf: {e}"))?;
+    Ok(out)
+}
+
+/// Derive ECDH shared wrap key: secp256k1 ECDH x-coordinate → HKDF-SHA256.
+///
+/// Matches `shared.client_core.rekey.derive_shared_key_ecdh`.
+pub fn derive_shared_key_ecdh(own_privkey: &[u8; 32], other_pubkey_xy: &[u8]) -> Result<[u8; 32], String> {
+    if other_pubkey_xy.len() != 64 {
+        return Err(format!(
+            "other pubkey must be 64-byte uncompressed x||y, got {}",
+            other_pubkey_xy.len()
+        ));
+    }
+    let mut sec1 = [0u8; 65];
+    sec1[0] = 0x04;
+    sec1[1..].copy_from_slice(other_pubkey_xy);
+    let sk = SecretKey::from_slice(own_privkey).map_err(|e| format!("ecdh secret: {e}"))?;
+    let pk = PublicKey::from_sec1_bytes(&sec1).map_err(|e| format!("ecdh pubkey: {e}"))?;
+    let shared = k256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), pk.as_affine());
+    let shared_x = shared.raw_secret_bytes();
+    let hk = Hkdf::<Sha256>::new(None, shared_x.as_slice());
+    let mut out = [0u8; 32];
+    hk.expand(DOMAIN_ECDH_WRAP, &mut out)
+        .map_err(|e| format!("ecdh hkdf: {e}"))?;
+    Ok(out)
+}
+
+/// Wrap a 32-byte file encryption key with an ECDH shared key (AES-GCM).
+pub fn wrap_file_key(file_key: &[u8; 32], shared_key: &[u8; 32]) -> Result<(Vec<u8>, [u8; 12]), String> {
+    aes_gcm_encrypt_detached(shared_key, file_key)
+}
+
+/// Unwrap a file encryption key previously wrapped with ECDH.
+pub fn unwrap_file_key(
+    wrapped: &[u8],
+    wrap_nonce: &[u8; 12],
+    shared_key: &[u8; 32],
+) -> Result<[u8; 32], String> {
+    let plain = aes_gcm_decrypt_detached(shared_key, wrap_nonce, wrapped)?;
+    if plain.len() != 32 {
+        return Err(format!("unwrapped key length {}, expected 32", plain.len()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&plain);
+    Ok(out)
+}
+
+/// Encode uncompressed secp256k1 pubkey as 64-byte x||y (no 0x04 prefix).
+#[allow(dead_code)]
+pub fn pubkey_xy_from_privkey(privkey: &[u8; 32]) -> Result<[u8; 64], String> {
+    let sk = SecretKey::from_slice(privkey).map_err(|e| format!("secret: {e}"))?;
+    let point = sk.public_key().to_encoded_point(false);
+    let bytes = point.as_bytes();
+    if bytes.len() != 65 || bytes[0] != 0x04 {
+        return Err("unexpected pubkey encoding".into());
+    }
+    let mut out = [0u8; 64];
+    out.copy_from_slice(&bytes[1..]);
     Ok(out)
 }
 
@@ -124,5 +185,29 @@ mod tests {
         let key = [9u8; 32];
         let blob = aes_gcm_encrypt(&key, b"hello").unwrap();
         assert!(blob.len() > 12 + 16);
+    }
+
+    #[test]
+    fn ecdh_matches_python_cryptography_vector() {
+        let mut priv_a = [0u8; 32];
+        priv_a[31] = 0x11;
+        let mut priv_b = [0u8; 32];
+        priv_b[31] = 0x22;
+        let pub_b = hex::decode(
+            "1be68a5a028f2601d0e80d468c344ba331d611b96c358b6032e8b4da0547fc11\
+             bebc47511ade7308b3ca6265f9400779c076329c75146bc6ff1822f5d1f30e79",
+        )
+        .unwrap();
+        let shared = derive_shared_key_ecdh(&priv_a, &pub_b).unwrap();
+        assert_eq!(
+            hex::encode(shared),
+            "c7d4d9ccb0ae33f9dcad5834027d38a59232f0f462da50b0589cda9df3d4e926"
+        );
+        let ab = derive_shared_key_ecdh(&priv_a, &pubkey_xy_from_privkey(&priv_b).unwrap()).unwrap();
+        let ba = derive_shared_key_ecdh(&priv_b, &pubkey_xy_from_privkey(&priv_a).unwrap()).unwrap();
+        assert_eq!(ab, ba);
+        let file_key = [0xABu8; 32];
+        let (wrapped, nonce) = wrap_file_key(&file_key, &ab).unwrap();
+        assert_eq!(unwrap_file_key(&wrapped, &nonce, &ba).unwrap(), file_key);
     }
 }
