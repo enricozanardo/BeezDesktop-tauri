@@ -1,7 +1,25 @@
+use std::collections::HashSet;
 use std::net::IpAddr;
 
 use regex::Regex;
 use serde_json::{json, Value};
+
+fn titlecase_instance(id: &str) -> String {
+    let s = id.trim();
+    if s.is_empty() {
+        return "Smart".into();
+    }
+    if let Some(rest) = s.strip_prefix("smart") {
+        if rest.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty() {
+            return format!("Smart{rest}");
+        }
+    }
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Smart".into(),
+    }
+}
 
 use crate::http;
 use crate::minicpm;
@@ -288,6 +306,7 @@ pub fn list_smart_nodes() -> Value {
                         "price_per_embedding",
                         "wallet_address",
                         "node_id",
+                        "instance_id",
                         "models",
                     ] {
                         if let Some(v) = info.get(k) {
@@ -311,18 +330,50 @@ pub fn list_smart_nodes() -> Value {
             }
         }
         if let Some(obj) = node.as_object_mut() {
-            if obj.get("label").is_none() {
-                let label = obj
-                    .get("node_id")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| obj.get("ip").and_then(|v| v.as_str()))
-                    .unwrap_or("smart");
-                obj.insert("label".into(), json!(label));
-            }
+            let instance = obj
+                .get("instance_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let model = obj.get("llm_model").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            let ip = obj.get("ip").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            let nid = obj.get("node_id").and_then(|v| v.as_str()).unwrap_or("smart");
+            // Prefer Smart3 · deepseek-chat · 128… over opaque smart_2_abcdef
+            let label = match (instance, model, ip) {
+                (Some(inst), Some(m), Some(addr)) => format!(
+                    "{} · {} · {}",
+                    titlecase_instance(inst),
+                    m,
+                    addr
+                ),
+                (Some(inst), None, Some(addr)) => format!("{} · {}", titlecase_instance(inst), addr),
+                (Some(inst), Some(m), None) => format!("{} · {}", titlecase_instance(inst), m),
+                (Some(inst), None, None) => titlecase_instance(inst),
+                (None, Some(m), Some(addr)) => format!("{} · {} · {}", nid, m, addr),
+                (None, None, Some(addr)) => format!("{} · {}", nid, addr),
+                _ => nid.to_string(),
+            };
+            obj.insert("label".into(), json!(label));
             obj.insert("node_type".into(), json!("smart"));
         }
         merged.push(node);
     }
+    // Dedupe by http_url / ip (Directory may keep stale entries)
+    let mut seen = HashSet::new();
+    merged.retain(|n| {
+        if n.get("node_id").and_then(|v| v.as_str()) == Some("local_minicpm") {
+            return true;
+        }
+        let key = n
+            .get("http_url")
+            .and_then(|v| v.as_str())
+            .or_else(|| n.get("ip").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        if key.is_empty() {
+            return true;
+        }
+        seen.insert(key)
+    });
     merged.insert(0, minicpm::local_node());
     json!({
         "ok": true,

@@ -4,6 +4,7 @@
 
 	type SmartNode = Record<string, unknown> & {
 		node_id?: string;
+		instance_id?: string;
 		ip?: string;
 		capabilities?: string[];
 		price_per_query?: number;
@@ -45,6 +46,16 @@
 		file_ids?: string[];
 	};
 
+	type IndexConfirm = {
+		chunks: number;
+		cost: number;
+		price_per_embedding: number;
+		balance: number | null;
+		balanceKnown: boolean;
+		note: string;
+		insufficient: boolean;
+	};
+
 	let nodes = $state<SmartNode[]>([]);
 	let selected = $state<SmartNode | null>(null);
 	let needed = $state<string[]>([]);
@@ -60,6 +71,7 @@
 	let chats = $state<Conversation[]>([]);
 	let chatId = $state<string>('');
 	let workspace = $state<Record<string, unknown> | null>(null);
+	let indexConfirm = $state<IndexConfirm | null>(null);
 	let poll: ReturnType<typeof setInterval> | undefined;
 
 	function capList(n: SmartNode): string {
@@ -70,6 +82,22 @@
 
 	function isLocal(n: SmartNode | null): boolean {
 		return n?.node_id === 'local_minicpm' || n?.llm_backend === 'minicpm_local';
+	}
+
+	function nodeLabel(n: SmartNode | null): string {
+		if (!n) return 'No node selected';
+		return String(n.label || n.instance_id || n.node_id || n.ip || 'Smart');
+	}
+
+	function currentChatTitle(): string {
+		const saved = chats.find((c) => c.id === chatId);
+		if (saved?.title) return saved.title;
+		const first = messages.find((m) => m.role === 'user')?.content?.slice(0, 48);
+		return first || 'New conversation';
+	}
+
+	function chatInList(): boolean {
+		return chats.some((c) => c.id === chatId);
 	}
 
 	function estimatedQueryCost(): number {
@@ -114,6 +142,7 @@
 		threadId = undefined;
 		fileIds = [];
 		status = '';
+		indexConfirm = null;
 	}
 
 	function resumeChat(c: Conversation) {
@@ -150,6 +179,11 @@
 		const errs = ranked.errors as unknown[] | undefined;
 		if ((!nodes || nodes.length === 0) && errs?.length) {
 			discoverError = JSON.stringify(errs);
+		}
+		const saved = chats.find((c) => c.id === chatId);
+		if (saved?.node_id) {
+			const byChat = nodes.find((n) => n.node_id === saved.node_id);
+			if (byChat) selected = byChat;
 		}
 		if (!selected && nodes.length) selected = nodes[0];
 		if (selected) {
@@ -305,15 +339,53 @@
 		const cost = Number(est.estimated_cost || 0);
 		const note =
 			est.truncated || est.chunk_capped
-				? `\n\nNote: this file is large — only ~${est.chunks} chunks (first ~${est.max_chars} characters) will be indexed for Ask. Full encrypted storage is Files → Upload.`
+				? `Large file: only ~${est.chunks} chunks (first ~${est.max_chars} characters) will be indexed for Ask. Full encrypted storage is Files → Upload.`
 				: '';
-		if (
-			!confirm(
-				`Index ${est.chunks} chunks at ~${cost} BZT (${est.price_per_embedding} BZT / embedding)?${note}\n\nYou can Ask general questions without indexing.`
-			)
-		) {
+
+		const wallet = await sidecarCall('wallet_status');
+		if (wallet.has_wallet === false || wallet.ok === false) {
+			status = 'Create a wallet before indexing (Wallet section).';
 			return;
 		}
+
+		let balance: number | null = null;
+		let balanceKnown = false;
+		const ledger = await sidecarCall('wallet_ledger');
+		if (ledger.ok !== false && ledger.balance != null && ledger.balance !== '') {
+			const n = Number(ledger.balance);
+			if (!Number.isNaN(n)) {
+				balance = n;
+				balanceKnown = true;
+			}
+		}
+
+		const insufficient = balanceKnown && balance != null && balance < cost;
+		indexConfirm = {
+			chunks: Number(est.chunks || 0),
+			cost,
+			price_per_embedding: Number(est.price_per_embedding || 0),
+			balance,
+			balanceKnown,
+			note,
+			insufficient
+		};
+		if (insufficient) {
+			status = `Insufficient balance: need ~${cost} BZT, wallet has ${balance} BZT.`;
+		} else if (!balanceKnown) {
+			status = 'Could not read wallet balance; you may still proceed.';
+		} else {
+			status = '';
+		}
+	}
+
+	function cancelIndexConfirm() {
+		indexConfirm = null;
+	}
+
+	async function proceedIndexConfirm() {
+		if (!indexConfirm || !selected || indexConfirm.insufficient) return;
+		const cost = indexConfirm.cost;
+		indexConfirm = null;
 		busy = true;
 		status = `Indexing in small batches (~${cost} BZT)…`;
 		const ready = await sidecarCall('embed_ensure');
@@ -393,15 +465,59 @@
 <h1>Ask</h1>
 <p class="lead">
 	1) Create a wallet. 2) Pick a Smart node (or Local MiniCPM). 3) Ask anything — the node’s LLM
-	(e.g. GLM) answers general prompts without indexing. 4) Optional: Index a document for
-	document-grounded Q&A (RAG). Large files are capped and embedded in small batches so the PC
-	does not run out of memory. Full encrypted storage is Files → Upload, not Ask Index.
+	answers general prompts without indexing. 4) Optional: Index a document for document-grounded
+	Q&A (RAG). Large files are capped and embedded in small batches. Full encrypted storage is
+	Files → Upload, not Ask Index.
 </p>
+
+{#if indexConfirm}
+	<div class="confirm-backdrop" role="presentation">
+		<div class="confirm-panel" role="dialog" aria-labelledby="index-confirm-title">
+			<strong id="index-confirm-title">Confirm indexing</strong>
+			<p>
+				Index <strong>{indexConfirm.chunks}</strong> chunks at
+				<strong>~{indexConfirm.cost}</strong> BZT
+				({indexConfirm.price_per_embedding} BZT / embedding) on
+				<strong>{nodeLabel(selected)}</strong>?
+			</p>
+			{#if indexConfirm.balanceKnown}
+				<p class="meta">
+					Wallet balance: <strong>{indexConfirm.balance}</strong> BZT
+					{#if indexConfirm.insufficient}
+						<span class="danger"> — insufficient for this index</span>
+					{/if}
+				</p>
+			{:else}
+				<p class="meta">Wallet balance could not be read; proceed only if you have enough BZT.</p>
+			{/if}
+			{#if indexConfirm.note}
+				<p class="meta">{indexConfirm.note}</p>
+			{/if}
+			<p class="meta">You can Ask general questions without indexing.</p>
+			<div class="row">
+				<button class="ghost" onclick={cancelIndexConfirm}>Cancel</button>
+				<button
+					class="primary"
+					onclick={proceedIndexConfirm}
+					disabled={indexConfirm.insufficient || busy}
+				>
+					{indexConfirm.insufficient ? 'Insufficient BZT' : `Index · ~${indexConfirm.cost} BZT`}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <div class="ask-shell">
 	<aside class="ask-side">
 		<strong>Chats</strong>
 		<button class="ghost" onclick={startNewChat}>New chat</button>
+		{#if chatId && !chatInList()}
+			<button class="node-card active ghost-chat" disabled>
+				<div>New conversation</div>
+				<div class="caps">unsaved · current</div>
+			</button>
+		{/if}
 		{#each chats as c}
 			<button class="node-card" class:active={chatId === c.id} onclick={() => resumeChat(c)}>
 				<div>{c.title}</div>
@@ -467,6 +583,16 @@
 		{/if}
 	</aside>
 	<section class="ask-main">
+		<div class="ask-session">
+			<div>
+				<span class="ask-session-label">Chat</span>
+				<strong>{currentChatTitle()}</strong>
+			</div>
+			<div>
+				<span class="ask-session-label">Node</span>
+				<strong>{nodeLabel(selected)}</strong>
+			</div>
+		</div>
 		<div class="messages">
 			{#if messages.length === 0}
 				<p class="lead">
@@ -507,7 +633,7 @@
 			<div class="row">
 				<input type="text" bind:value={attachPath} placeholder="File to index (PDF or text)" />
 				<button class="ghost" onclick={browseFile}>Browse</button>
-				<button class="ghost" onclick={indexAttach}>Index into node</button>
+				<button class="ghost" onclick={indexAttach} disabled={busy}>Index into node</button>
 			</div>
 			<textarea
 				bind:value={draft}

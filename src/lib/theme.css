@@ -167,16 +167,77 @@ button.ghost {
 	padding: 0.6rem 0.7rem;
 	cursor: pointer;
 	font-size: 0.85rem;
+	text-align: left;
+	background: transparent;
+	color: inherit;
+	opacity: 0.82;
+	transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
 }
 
 .node-card.active {
 	border-color: var(--gold);
+	background: var(--bg-card);
+	opacity: 1;
+	box-shadow: inset 3px 0 0 var(--gold);
+	font-weight: 600;
+}
+
+.node-card.ghost-chat {
+	cursor: default;
+	opacity: 1;
 }
 
 .node-card .caps {
 	color: var(--muted);
 	font-size: 0.75rem;
 	margin-top: 0.2rem;
+	font-weight: 400;
+}
+
+.ask-session {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 1rem 1.5rem;
+	padding: 0.75rem 1.25rem;
+	border-bottom: 1px solid var(--border);
+	background: var(--bg-card);
+	font-size: 0.9rem;
+}
+
+.ask-session-label {
+	display: block;
+	font-size: 0.7rem;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--muted);
+	margin-bottom: 0.15rem;
+}
+
+.confirm-backdrop {
+	position: fixed;
+	inset: 0;
+	background: rgba(0, 0, 0, 0.55);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 40;
+	padding: 1rem;
+}
+
+.confirm-panel {
+	background: var(--bg-card);
+	border: 1px solid var(--gold);
+	border-radius: 10px;
+	padding: 1.1rem 1.25rem;
+	max-width: 28rem;
+	width: 100%;
+	display: flex;
+	flex-direction: column;
+	gap: 0.55rem;
+}
+
+.confirm-panel .danger {
+	color: var(--danger);
 }
 
 .messages {
