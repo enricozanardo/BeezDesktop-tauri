@@ -31,6 +31,7 @@
 		error?: string;
 		code?: string;
 		endpoint?: string;
+		mode?: string;
 	};
 
 	type Conversation = {
@@ -269,6 +270,7 @@
 				local: Boolean(result.local),
 				code: result.code === 'empty_workspace' ? 'empty_workspace' : txFailed ? 'tx_failed' : undefined,
 				endpoint: result.endpoint as string | undefined,
+				mode: typeof result.mode === 'string' ? result.mode : undefined,
 				error: txFailed ? String((result.tx as Record<string, unknown>)?.error || 'settlement failed') : undefined
 			}
 		];
@@ -485,7 +487,11 @@
 							{/if}
 							{#if m.tx_hash} · settled {m.tx_hash.slice(0, 10)}…{/if}
 							{#if m.code === 'tx_failed'} · answer delivered, settlement failed{/if}
-							{#if m.code === 'empty_workspace'} · general answer (no matching indexed docs){/if}
+							{#if m.mode === 'general' || m.code === 'empty_workspace'}
+								· general knowledge (no matching indexed docs)
+							{:else if m.mode === 'rag'}
+								· from indexed docs
+							{/if}
 							{#if m.endpoint} · {m.endpoint}{/if}
 							{#if m.sources && m.sources.length} · {m.sources.length} citations{/if}
 						</div>
