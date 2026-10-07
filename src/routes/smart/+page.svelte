@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { sidecarCall } from '#lib';
+	import { sidecarCall, WorkspacePicker } from '#lib';
+	import type { WorkspaceFile } from '#lib';
 	import { open } from '@tauri-apps/plugin-dialog';
 
 	type SmartNode = Record<string, unknown> & {
@@ -73,7 +74,8 @@
 	let minicpm = $state<Record<string, unknown> | null>(null);
 	let chats = $state<Conversation[]>([]);
 	let chatId = $state<string>('');
-	let workspace = $state<Record<string, unknown> | null>(null);
+	let workspaceFiles = $state<WorkspaceFile[]>([]);
+	let showDocs = $state(false);
 	let indexConfirm = $state<IndexConfirm | null>(null);
 	let poll: ReturnType<typeof setInterval> | undefined;
 
@@ -165,10 +167,31 @@
 
 	async function refreshWorkspace() {
 		if (!selected || isLocal(selected)) {
-			workspace = null;
+			workspaceFiles = [];
 			return;
 		}
-		workspace = await sidecarCall('workspace_stats', { node: selected });
+		const ws = await sidecarCall('workspace_stats', { node: selected });
+		workspaceFiles = Array.isArray(ws.files) ? (ws.files as WorkspaceFile[]) : [];
+	}
+
+	function docName(id: string): string {
+		return workspaceFiles.find((f) => f.file_id === id)?.file_name || id.slice(0, 8);
+	}
+
+	async function removeDoc(f: WorkspaceFile) {
+		if (!selected) return;
+		if (
+			!confirm(
+				`Remove “${f.file_name || f.file_id}” from ${nodeLabel(selected)}? Its index is deleted; listings that use it stop answering from it.`
+			)
+		)
+			return;
+		busy = true;
+		const r = await sidecarCall('workspace_remove', { node: selected, file_id: f.file_id });
+		busy = false;
+		status = r.ok === false ? String(r.error) : `Removed ${f.file_name || f.file_id}.`;
+		fileIds = fileIds.filter((id) => id !== f.file_id);
+		await refreshWorkspace();
 	}
 
 	async function refreshNodes(prompt = '') {
@@ -589,12 +612,10 @@
 				<button class="ghost" onclick={startMini}>Start local</button>
 			</div>
 		{/if}
-		{#if workspace && workspace.ok !== false}
+		{#if selected && !isLocal(selected)}
 			<p class="meta">
-				Workspace files: {workspace.file_count ?? workspace.files ?? workspace.indexed_files ?? '—'}
-				{#if Number(workspace.file_count || workspace.chunk_count || 0) === 0}
-					— Ask still runs, but retrieval may return no relevant data until you index a file.
-				{/if}
+				{workspaceFiles.length} document(s) indexed on this node.
+				{#if workspaceFiles.length === 0}Ask still answers general questions.{/if}
 			</p>
 		{/if}
 	</aside>
@@ -648,8 +669,31 @@
 		</div>
 		<div class="composer">
 			{#if status}<div class="meta">{status}</div>{/if}
+			{#if selected && !isLocal(selected)}
+				<div class="row">
+					<span class="meta" style="margin:0">
+						Answer from:
+						{#if fileIds.length === 0}
+							<strong>all {workspaceFiles.length} indexed document(s)</strong>
+						{:else}
+							<strong>{fileIds.map(docName).join(', ')}</strong>
+						{/if}
+					</span>
+					<button class="ghost" onclick={() => (showDocs = !showDocs)}>
+						{showDocs ? 'Hide documents' : 'Choose documents'}
+					</button>
+				</div>
+				{#if showDocs}
+					{#if workspaceFiles.length}
+						<WorkspacePicker files={workspaceFiles} bind:selected={fileIds} {busy} onremove={removeDoc} />
+						<p class="meta" style="margin:0">No selection = search all documents.</p>
+					{:else}
+						<p class="meta" style="margin:0">No documents indexed on this node yet. Index one below.</p>
+					{/if}
+				{/if}
+			{/if}
 			<div class="row">
-				<input type="text" bind:value={attachPath} placeholder="File to index (PDF or text)" />
+				<input type="text" class="grow" bind:value={attachPath} placeholder="File to index (PDF or text)" />
 				<button class="ghost" onclick={browseFile}>Browse</button>
 				<button class="ghost" onclick={indexAttach} disabled={busy}>Index into node</button>
 			</div>

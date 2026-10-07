@@ -65,6 +65,23 @@ pub fn post_json(url: &str, body: &Value, timeout_secs: u64) -> Result<(u16, Val
     Ok((status, val, text))
 }
 
+pub fn send_json(
+    method: reqwest::Method,
+    url: &str,
+    body: &Value,
+    timeout_secs: u64,
+) -> Result<(u16, Value, String), String> {
+    let resp = client(timeout_secs, 4000)?
+        .request(method, url)
+        .json(body)
+        .send()
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let text = resp.text().map_err(|e| e.to_string())?;
+    let val = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
+    Ok((status, val, text))
+}
+
 pub fn get_bytes(url: &str, timeout_secs: u64) -> Result<Vec<u8>, String> {
     let mut resp = client(timeout_secs, 3000)?
         .get(url)

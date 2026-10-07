@@ -29,6 +29,23 @@ pub fn recent_blocks() -> Value {
     }
 }
 
+pub fn knowledge_seller_stats() -> Value {
+    let wallet = match load_or_migrate() {
+        Ok((Some(w), _)) => w,
+        Ok((None, _)) => return json!({"ok": false, "error": "Create a wallet first."}),
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    match first_chain_json(&format!("/api/knowledge/seller/{}/stats", wallet.address)) {
+        Ok((source, data)) => json!({
+            "ok": true,
+            "source": source,
+            "listings": data.get("listings").cloned().unwrap_or(json!([])),
+            "totals": data.get("totals").cloned().unwrap_or(json!({})),
+        }),
+        Err(e) => json!({"ok": false, "error": e}),
+    }
+}
+
 pub fn wallet_ledger() -> Value {
     let wallet = match load_or_migrate() {
         Ok((Some(w), _)) => w,
@@ -51,7 +68,16 @@ pub fn wallet_ledger() -> Value {
                     900,
                 )
                 .unwrap_or(json!({}));
+                let pending = http::get_json_connect(
+                    &format!("{base}/api/mempool/transactions?address={}&limit=50", wallet.address),
+                    6,
+                    900,
+                )
+                .ok()
+                .and_then(|v| v.get("pending_transactions").cloned())
+                .unwrap_or(json!([]));
                 return json!({
+                    "pending": pending,
                     "ok": true,
                     "has_wallet": true,
                     "address": wallet.address,

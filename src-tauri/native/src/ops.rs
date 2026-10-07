@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::chunking::split_into_rag_chunks;
-use crate::crypto::{aes_gcm_encrypt, derive_encryption_key, sha256_hex};
+use crate::crypto::{aes_gcm_encrypt, derive_encryption_key, sha256_hex, sign_der};
 use crate::embed;
 use crate::http;
 use crate::minicpm;
@@ -582,6 +582,97 @@ pub fn knowledge_mine(params: &Value) -> Value {
     match http::get_json_query(&url, &[("seller_address", wallet.address)], 12) {
         Ok(data) => json!({"ok": true, "listings": data.get("listings").cloned().unwrap_or(json!([]))}),
         Err(e) => json!({"ok": false, "error": e}),
+    }
+}
+
+fn signed_seller_body(wallet: &Wallet, action: &str, listing_id: &str) -> Result<Value, String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    let message = format!("beez-marketplace:{action}:{listing_id}:{}:{ts}", wallet.address);
+    let sig = sign_der(&wallet.privkey, message.as_bytes())?;
+    Ok(json!({
+        "seller_address": wallet.address,
+        "ts": ts,
+        "pub": wallet.pubkey_hex()?,
+        "sig": hex::encode(sig),
+    }))
+}
+
+fn listing_mutation(params: &Value, action: &str) -> Value {
+    let wallet = match require_wallet() {
+        Ok(w) => w,
+        Err(e) => return fail("no_wallet", e),
+    };
+    let node = params.get("node").cloned().unwrap_or(json!({}));
+    let listing_id = params.get("listing_id").and_then(|v| v.as_str()).unwrap_or("");
+    if listing_id.is_empty() {
+        return fail("bad_request", "listing_id required");
+    }
+    let mut body = match signed_seller_body(&wallet, action, listing_id) {
+        Ok(b) => b,
+        Err(e) => return fail("crypto", e),
+    };
+    let method = if action == "delete" {
+        reqwest::Method::DELETE
+    } else {
+        if let (Some(dst), Some(fields)) = (
+            body.as_object_mut(),
+            params.get("fields").and_then(|v| v.as_object()),
+        ) {
+            for key in ["title", "description", "tags", "price_per_query", "purchase_price", "status"] {
+                if let Some(v) = fields.get(key) {
+                    dst.insert(key.into(), v.clone());
+                }
+            }
+        }
+        reqwest::Method::PUT
+    };
+    let url = format!("{}/marketplace/listing/{listing_id}", smart_url(&node));
+    match http::send_json(method, &url, &body, 15) {
+        Ok((200, _, _)) => json!({"ok": true, "listing_id": listing_id}),
+        Ok((status, v, raw)) => fail(
+            "rejected",
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{status}: {}", raw.chars().take(300).collect::<String>())),
+        ),
+        Err(e) => fail("unreachable", e),
+    }
+}
+
+pub fn knowledge_update(params: &Value) -> Value {
+    listing_mutation(params, "update")
+}
+
+pub fn knowledge_delete(params: &Value) -> Value {
+    listing_mutation(params, "delete")
+}
+
+pub fn workspace_remove(params: &Value) -> Value {
+    let wallet = match require_wallet() {
+        Ok(w) => w,
+        Err(e) => return fail("no_wallet", e),
+    };
+    let node = params.get("node").cloned().unwrap_or(json!({}));
+    let file_id = params.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
+    if file_id.is_empty() {
+        return fail("bad_request", "file_id required");
+    }
+    let url = format!(
+        "{}/workspace/{file_id}?wallet_address={}",
+        smart_url(&node),
+        wallet.address
+    );
+    match http::send_json(reqwest::Method::DELETE, &url, &json!({}), 15) {
+        Ok((200, _, _)) => json!({"ok": true, "file_id": file_id}),
+        Ok((status, v, _)) => fail(
+            "rejected",
+            v.get("error").and_then(|e| e.as_str()).unwrap_or(&format!("HTTP {status}")).to_string(),
+        ),
+        Err(e) => fail("unreachable", e),
     }
 }
 

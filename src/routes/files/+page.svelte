@@ -415,7 +415,7 @@
 	}
 	.caps {
 		color: var(--muted);
-		font-size: 0.8rem;
+		font-size: 0.88rem;
 	}
 	.transfer {
 		margin-top: 0.75rem;
