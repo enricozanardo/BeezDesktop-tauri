@@ -12,14 +12,17 @@ use crate::crypto::{
 use crate::http;
 use crate::nodes::{http_url_for, list_all_nodes};
 use crate::tx::{
-    build_ownership_accept_tx, build_ownership_cancel_tx, build_ownership_reject_tx,
-    build_ownership_request_tx, build_upload_tx, send_raw_tx_timeout,
+    build_asset_price_tx, build_asset_visibility_tx, build_ownership_accept_tx,
+    build_ownership_cancel_tx, build_ownership_reject_tx, build_ownership_request_tx,
+    build_upload_tx, send_raw_tx_timeout,
 };
 use crate::wallet::Wallet;
 use crate::wallet_store::require_wallet;
 
 const CHUNK_SIZE: usize = 1024 * 1024;
 const MAX_FILE: u64 = 500 * 1024 * 1024;
+/// Chain protocol fee for an `upload` TX (`fee_config.TRANSACTION_FEES`).
+const UPLOAD_FEE: f64 = 0.10;
 
 fn fail(code: &str, error: impl Into<String>) -> Value {
     json!({"ok": false, "code": code, "error": error.into()})
@@ -154,6 +157,7 @@ pub fn estimate(params: &Value) -> Value {
         "storage_nodes": nodes.len(),
         "duration_years": duration,
         "estimated_cost": price * chunks as f64 * duration as f64,
+        "network_fee": UPLOAD_FEE,
         "price_per_chunk": price,
         "nodes": nodes.iter().map(|n| json!({
             "node_id": n.get("node_id"),
@@ -447,6 +451,7 @@ pub fn ownership_transfer(params: &Value) -> Value {
     let tx = match build_ownership_request_tx(
         &wallet,
         file_id,
+        &wallet.address,
         new_owner,
         asking_price,
         message,
@@ -470,6 +475,125 @@ pub fn ownership_transfer(params: &Value) -> Value {
         "asking_price": asking_price,
         "status": "pending",
     })
+}
+
+/// Buyer asks the owner of a public asset to sell it at the listed price.
+pub fn purchase_request(params: &Value) -> Value {
+    let wallet = match require_wallet() {
+        Ok(w) => w,
+        Err(e) => return fail("no_wallet", e),
+    };
+    let file_id = params.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
+    let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    if file_id.is_empty() {
+        return fail("args", "file_id is required");
+    }
+    let asset = match fetch_asset(file_id) {
+        Ok(a) => a,
+        Err(e) => return fail("not_found", e),
+    };
+    let owner = asset.get("owner").and_then(|v| v.as_str()).unwrap_or("");
+    if owner.is_empty() {
+        return fail("not_found", "asset has no owner on chain");
+    }
+    if owner == wallet.address {
+        return fail("args", "You already own this file");
+    }
+    if asset.get("visibility").and_then(|v| v.as_str()) != Some("public") {
+        return fail("forbidden", "This file is not listed on the marketplace");
+    }
+    if asset.get("transfer_locked").and_then(|v| v.as_bool()) == Some(true) {
+        return fail("locked", "Another transfer of this file is already pending");
+    }
+    let price = asset.get("price").map(parse_price_bzt).unwrap_or(0.0);
+    let tx = match build_ownership_request_tx(
+        &wallet, file_id, owner, &wallet.address, price, message, None, None, None,
+    ) {
+        Ok(t) => t,
+        Err(e) => return fail("tx_build", e),
+    };
+    let sent = send_raw_tx_timeout(&tx, 45);
+    if sent.get("ok") != Some(&json!(true)) {
+        return json!({"ok": false, "code": "tx_failed", "error": sent});
+    }
+    json!({
+        "ok": true,
+        "tx_hash": tx.get("tx_hash"),
+        "file_id": file_id,
+        "seller": owner,
+        "asking_price": price,
+        "status": "pending",
+    })
+}
+
+/// Owner lists (`public`) or unlists (`private`) a file and optionally reprices it.
+pub fn set_listing(params: &Value) -> Value {
+    let wallet = match require_wallet() {
+        Ok(w) => w,
+        Err(e) => return fail("no_wallet", e),
+    };
+    let file_id = params.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
+    let visibility = params.get("visibility").and_then(|v| v.as_str());
+    let price = params.get("price").and_then(|v| v.as_f64());
+    let old_price = params.get("old_price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    if file_id.is_empty() || (visibility.is_none() && price.is_none()) {
+        return fail("args", "file_id and a visibility or price change are required");
+    }
+    if let Some(v) = visibility {
+        if v != "public" && v != "private" {
+            return fail("args", "visibility must be public or private");
+        }
+    }
+    if let Some(p) = price {
+        if !p.is_finite() || p < 0.0 {
+            return fail("args", "price must be zero or positive");
+        }
+    }
+    let mut txs = Vec::new();
+    if let Some(p) = price {
+        match build_asset_price_tx(&wallet, file_id, p, old_price) {
+            Ok(t) => txs.push(t),
+            Err(e) => return fail("tx_build", e),
+        }
+    }
+    if let Some(v) = visibility {
+        match build_asset_visibility_tx(&wallet, file_id, v) {
+            Ok(t) => txs.push(t),
+            Err(e) => return fail("tx_build", e),
+        }
+    }
+    let mut hashes = Vec::new();
+    for tx in &txs {
+        let sent = send_raw_tx_timeout(tx, 45);
+        if sent.get("ok") != Some(&json!(true)) {
+            return json!({"ok": false, "code": "tx_failed", "error": sent, "submitted": hashes});
+        }
+        hashes.push(tx.get("tx_hash").cloned().unwrap_or(Value::Null));
+    }
+    json!({"ok": true, "tx_hashes": hashes})
+}
+
+/// Public files listed by other wallets (`/api/marketplace/assets`).
+pub fn marketplace(params: &Value) -> Value {
+    let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).min(200);
+    let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+    for base in crate::nodes::chain_http_urls() {
+        let Ok(url) = reqwest::Url::parse_with_params(
+            &format!("{base}/api/marketplace/assets"),
+            &[("query", query.to_string()), ("limit", limit.to_string()), ("offset", offset.to_string())],
+        ) else {
+            continue;
+        };
+        if let Ok(data) = http::get_json_connect(url.as_str(), 10, 1200) {
+            return json!({
+                "ok": true,
+                "assets": data.get("assets").cloned().unwrap_or(json!([])),
+                "total": data.get("total").cloned().unwrap_or(Value::Null),
+            });
+        }
+    }
+    fail("chain", "no chain node returned marketplace assets")
 }
 
 pub fn ownership_pending() -> Value {

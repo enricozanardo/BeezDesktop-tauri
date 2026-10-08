@@ -616,3 +616,70 @@ select {
 	height: 1.1rem;
 	accent-color: var(--gold);
 }
+
+.kv {
+	display: grid;
+	grid-template-columns: max-content minmax(0, 1fr);
+	gap: 0.4rem 1.25rem;
+	margin: 0;
+}
+
+.kv dt {
+	color: var(--muted);
+}
+
+.kv dd {
+	margin: 0;
+	overflow-wrap: anywhere;
+}
+
+.kv .total {
+	font-weight: 700;
+	color: var(--gold);
+}
+
+.choices {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+	gap: 0.6rem;
+}
+
+.choice {
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	padding: 0.7rem 0.9rem;
+	cursor: pointer;
+	display: flex;
+	gap: 0.6rem;
+	align-items: flex-start;
+}
+
+.choice.active {
+	border-color: var(--gold);
+	background: #1c1a14;
+}
+
+.choice p {
+	margin: 0.15rem 0 0;
+	color: var(--muted);
+	font-size: 0.88rem;
+}
+
+.choice input {
+	margin-top: 0.3rem;
+	accent-color: var(--gold);
+}
+
+.tabs .badge {
+	margin-left: 0.4rem;
+	background: var(--gold);
+	color: var(--bg);
+	border-radius: 999px;
+	padding: 0 0.5rem;
+	font-size: 0.8rem;
+	font-weight: 700;
+}
+
+.error {
+	color: var(--danger);
+}

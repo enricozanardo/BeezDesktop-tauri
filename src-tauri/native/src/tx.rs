@@ -328,9 +328,13 @@ fn price_bzt(asking_price: f64) -> String {
     }
 }
 
+/// Ownership request signed by either party: the owner offering the file
+/// (`current_owner == wallet.address`) or a buyer asking to purchase it
+/// (`new_owner == wallet.address`).
 pub fn build_ownership_request_tx(
     wallet: &Wallet,
     file_id: &str,
+    current_owner: &str,
     new_owner: &str,
     asking_price: f64,
     message: &str,
@@ -343,14 +347,14 @@ pub fn build_ownership_request_tx(
     let price = price_bzt(asking_price);
     let payload = format!(
         "{}|{}|{}|{}|{}",
-        wallet.address, new_owner, file_id, price, timestamp
+        current_owner, new_owner, file_id, price, timestamp
     );
     let tx_hash = sha256_hex(payload.as_bytes());
     let mut tx = Map::new();
     tx.insert("type".into(), json!("ownership_request"));
     tx.insert("nonce".into(), json!(nonce));
     tx.insert("file_id".into(), json!(file_id));
-    tx.insert("current_owner".into(), json!(wallet.address));
+    tx.insert("current_owner".into(), json!(current_owner));
     tx.insert("new_owner".into(), json!(new_owner));
     tx.insert("asking_price".into(), json!(price));
     tx.insert("timestamp".into(), json!(timestamp));
@@ -368,7 +372,9 @@ pub fn build_ownership_request_tx(
         tx.insert("file_encryption_nonce".into(), json!(n));
     }
     let pubhex = wallet.pubkey_hex()?;
-    tx.insert("seller_pubkey".into(), json!(pubhex.clone()));
+    if current_owner == wallet.address {
+        tx.insert("seller_pubkey".into(), json!(pubhex.clone()));
+    }
     canonicalize_and_sign(
         &mut tx,
         &wallet.privkey,
@@ -535,6 +541,80 @@ pub fn build_ownership_cancel_tx(
     Ok(Value::Object(tx))
 }
 
+/// Owner sets the marketplace asking price of an asset.
+pub fn build_asset_price_tx(
+    wallet: &Wallet,
+    file_id: &str,
+    new_price: f64,
+    old_price: f64,
+) -> Result<Value, String> {
+    let timestamp = chain_timestamp();
+    let new_price = format!("{new_price:.6} BZT");
+    let payload = format!("{}|{}|{}|{}", wallet.address, file_id, new_price, timestamp);
+    let mut tx = Map::new();
+    tx.insert("type".into(), json!("update_digital_asset_price"));
+    tx.insert("nonce".into(), json!(unix_nonce()));
+    tx.insert("file_id".into(), json!(file_id));
+    tx.insert("owner_address".into(), json!(wallet.address));
+    tx.insert("new_price".into(), json!(new_price));
+    tx.insert("old_price".into(), json!(format!("{old_price:.6} BZT")));
+    tx.insert("timestamp".into(), json!(timestamp));
+    tx.insert("tx_hash".into(), json!(sha256_hex(payload.as_bytes())));
+    let pubhex = wallet.pubkey_hex()?;
+    canonicalize_and_sign(
+        &mut tx,
+        &wallet.privkey,
+        &pubhex,
+        &[
+            "type",
+            "nonce",
+            "file_id",
+            "owner_address",
+            "new_price",
+            "old_price",
+            "update_reason",
+            "timestamp",
+            "tx_hash",
+        ],
+    )?;
+    Ok(Value::Object(tx))
+}
+
+/// Owner lists (`public`) or unlists (`private`) an asset on the marketplace.
+pub fn build_asset_visibility_tx(
+    wallet: &Wallet,
+    file_id: &str,
+    visibility: &str,
+) -> Result<Value, String> {
+    let timestamp = chain_timestamp();
+    let payload = format!("{}|{}|{}|{}", wallet.address, file_id, visibility, timestamp);
+    let mut tx = Map::new();
+    tx.insert("type".into(), json!("update_digital_asset_visibility"));
+    tx.insert("nonce".into(), json!(unix_nonce()));
+    tx.insert("file_id".into(), json!(file_id));
+    tx.insert("owner_address".into(), json!(wallet.address));
+    tx.insert("visibility".into(), json!(visibility));
+    tx.insert("timestamp".into(), json!(timestamp));
+    tx.insert("tx_hash".into(), json!(sha256_hex(payload.as_bytes())));
+    let pubhex = wallet.pubkey_hex()?;
+    canonicalize_and_sign(
+        &mut tx,
+        &wallet.privkey,
+        &pubhex,
+        &[
+            "type",
+            "nonce",
+            "file_id",
+            "owner_address",
+            "visibility",
+            "update_reason",
+            "timestamp",
+            "tx_hash",
+        ],
+    )?;
+    Ok(Value::Object(tx))
+}
+
 pub fn build_upload_tx(
     wallet: &Wallet,
     file_id: &str,
@@ -619,4 +699,49 @@ pub fn build_upload_tx(
         ],
     )?;
     Ok(Value::Object(tx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FILE_ID: &str = "0b9f3c2e-6a51-4f1e-9d7a-2c4b8e1f5a60";
+
+    fn field<'a>(tx: &'a Value, key: &str) -> &'a str {
+        tx.get(key).and_then(|v| v.as_str()).unwrap_or("")
+    }
+
+    #[test]
+    fn purchase_request_hash_names_seller_first_and_omits_seller_key() {
+        let buyer = Wallet::generate().unwrap();
+        let tx = build_ownership_request_tx(&buyer, FILE_ID, "bezSeller", &buyer.address, 12.5, "", None, None, None)
+            .unwrap();
+        let payload = format!(
+            "bezSeller|{}|{FILE_ID}|12.500000 BZT|{}",
+            buyer.address,
+            field(&tx, "timestamp")
+        );
+        assert_eq!(field(&tx, "tx_hash"), sha256_hex(payload.as_bytes()));
+        assert_eq!(field(&tx, "current_owner"), "bezSeller");
+        assert_eq!(field(&tx, "pub"), buyer.pubkey_hex().unwrap());
+        assert!(tx.get("seller_pubkey").is_none());
+
+        let offer = build_ownership_request_tx(&buyer, FILE_ID, &buyer.address, "bezOther", 0.0, "", None, None, None)
+            .unwrap();
+        assert_eq!(field(&offer, "seller_pubkey"), buyer.pubkey_hex().unwrap());
+    }
+
+    #[test]
+    fn listing_updates_use_chain_hash_payloads() {
+        let owner = Wallet::generate().unwrap();
+        let price = build_asset_price_tx(&owner, FILE_ID, 3.0, 1.0).unwrap();
+        let payload = format!("{}|{FILE_ID}|3.000000 BZT|{}", owner.address, field(&price, "timestamp"));
+        assert_eq!(field(&price, "tx_hash"), sha256_hex(payload.as_bytes()));
+        assert_eq!(field(&price, "old_price"), "1.000000 BZT");
+
+        let vis = build_asset_visibility_tx(&owner, FILE_ID, "public").unwrap();
+        let payload = format!("{}|{FILE_ID}|public|{}", owner.address, field(&vis, "timestamp"));
+        assert_eq!(field(&vis, "tx_hash"), sha256_hex(payload.as_bytes()));
+        assert_eq!(field(&vis, "owner_address"), owner.address);
+    }
 }
