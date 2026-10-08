@@ -139,12 +139,39 @@ fn canonical_value(v: &Value) -> Option<Value> {
     }
 }
 
-pub fn canonicalize_and_sign(
-    tx: &mut Map<String, Value>,
-    privkey: &[u8; 32],
-    pubkey_hex: &str,
-    canon_keys: &[&str],
-) -> Result<(), String> {
+fn sorted_location_lists(v: &Value) -> Value {
+    match v.as_object() {
+        Some(map) => Value::Object(
+            map.iter()
+                .map(|(k, nodes)| {
+                    let mut list: Vec<Value> = nodes.as_array().cloned().unwrap_or_default();
+                    list.sort_by(|a, b| a.as_str().unwrap_or("").cmp(b.as_str().unwrap_or("")));
+                    (k.clone(), Value::Array(list))
+                })
+                .collect(),
+        ),
+        None => v.clone(),
+    }
+}
+
+/// Python `json.dumps(..., ensure_ascii=True)` escaping of non-ASCII characters.
+fn ascii_escape(json_text: &str) -> String {
+    let mut out = String::with_capacity(json_text.len());
+    for ch in json_text.chars() {
+        if ch.is_ascii() {
+            out.push(ch);
+        } else {
+            let mut units = [0u16; 2];
+            for unit in ch.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    out
+}
+
+/// Bytes the chain verifies: `serialize_tx(canonicalize_for_signature(tx))`.
+pub fn canonical_message(tx: &Map<String, Value>, canon_keys: &[&str]) -> Result<Vec<u8>, String> {
     let mut canonical = Map::new();
     for k in canon_keys {
         if let Some(v) = tx.get(*k) {
@@ -153,7 +180,28 @@ pub fn canonicalize_and_sign(
             }
         }
     }
-    let message = serde_json::to_vec(&Value::Object(canonical)).map_err(|e| e.to_string())?;
+    for key in ["chunk_locations", "backup_chunk_locations"] {
+        if let Some(v) = canonical.get_mut(key) {
+            *v = sorted_location_lists(v);
+        }
+    }
+    if let Some(Value::Array(nodes)) = canonical.get_mut("beneficiary_nodes") {
+        nodes.sort_by(|a, b| {
+            let id = |v: &Value| v.get("node_id").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            id(a).cmp(&id(b))
+        });
+    }
+    let text = serde_json::to_string(&Value::Object(canonical)).map_err(|e| e.to_string())?;
+    Ok(ascii_escape(&text).into_bytes())
+}
+
+pub fn canonicalize_and_sign(
+    tx: &mut Map<String, Value>,
+    privkey: &[u8; 32],
+    pubkey_hex: &str,
+    canon_keys: &[&str],
+) -> Result<(), String> {
+    let message = canonical_message(tx, canon_keys)?;
     let sig = sign_der(privkey, &message)?;
     tx.insert("sig".into(), json!(hex::encode(sig)));
     tx.insert("pub".into(), json!(pubkey_hex));
@@ -172,6 +220,27 @@ pub fn py_float_str(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_message_matches_chain_serializer() {
+        let tx = json!({
+            "type": "upload", "nonce": 1, "amount": "5.000000 BZT", "uploader": "bezA",
+            "file_id": "f1", "file_name": "Università 😀.pdf", "file_size": 10, "num_chunks": 1,
+            "chunk_locations": {"f1_chunk_0": ["storage_b", "storage_a"]},
+            "backup_chunk_locations": {"f1_chunk_0": ["storage_c", "storage_a"]},
+            "storage_duration": 5, "query_hash": "q", "encryption_nonce": "n",
+            "guardian_dam_id": "", "timestamp": "t", "tx_hash": "h"
+        });
+        let keys = [
+            "type", "nonce", "amount", "uploader", "file_id", "file_name", "file_size",
+            "num_chunks", "chunk_locations", "backup_chunk_locations", "storage_duration",
+            "query_hash", "encryption_nonce", "guardian_dam_id", "timestamp", "tx_hash",
+        ];
+        let got = canonical_message(tx.as_object().unwrap(), &keys).unwrap();
+        // Produced by BeezChain: serialize_tx(canonicalize_for_signature(tx)).
+        let expected = r#"{"amount":"5.000000 BZT","backup_chunk_locations":{"f1_chunk_0":["storage_a","storage_c"]},"chunk_locations":{"f1_chunk_0":["storage_a","storage_b"]},"encryption_nonce":"n","file_id":"f1","file_name":"Universit\u00e0 \ud83d\ude00.pdf","file_size":10,"nonce":1,"num_chunks":1,"query_hash":"q","storage_duration":5,"timestamp":"t","tx_hash":"h","type":"upload","uploader":"bezA"}"#;
+        assert_eq!(String::from_utf8(got).unwrap(), expected);
+    }
 
     #[test]
     fn hkdf_length() {
