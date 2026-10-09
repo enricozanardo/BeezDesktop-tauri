@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { sidecarCall, WorkspacePicker } from '#lib';
+	import { sidecarCall, WorkspacePicker, live, startJob, refreshJobs, Progress, Pager, shortAddr } from '#lib';
 	import type { WorkspaceFile } from '#lib';
 	import { open } from '@tauri-apps/plugin-dialog';
+	import { untrack } from 'svelte';
 
 	type SmartNode = Record<string, unknown> & {
 		node_id?: string;
@@ -77,7 +78,37 @@
 	let workspaceFiles = $state<WorkspaceFile[]>([]);
 	let showDocs = $state(false);
 	let indexConfirm = $state<IndexConfirm | null>(null);
+	let indexNode = $state<SmartNode | null>(null);
+	let estimateJobId = $state<string | null>(null);
+	let chatQuery = $state('');
+	let chatOffset = $state(0);
+	let nodeQuery = $state('');
+	let nodeOffset = $state(0);
+	let handledJobs = new Set<string>();
 	let poll: ReturnType<typeof setInterval> | undefined;
+
+	const CHAT_PAGE = 8;
+	const NODE_PAGE = 5;
+
+	const filteredChats = $derived(
+		chats.filter((c) => (c.title || '').toLowerCase().includes(chatQuery.trim().toLowerCase()))
+	);
+	const filteredNodes = $derived(
+		nodes.filter((n) => {
+			const q = nodeQuery.trim().toLowerCase();
+			if (!q) return true;
+			return [n.label, n.node_id, n.wallet_address, n.llm_model, capList(n)]
+				.map((v) => String(v || '').toLowerCase())
+				.some((v) => v.includes(q));
+		})
+	);
+	const estimateJob = $derived(live.jobs.find((j) => j.id === estimateJobId) || null);
+	const indexJobs = $derived(live.jobs.filter((j) => j.kind === 'index'));
+	const localSteps = $derived({
+		runtime: Boolean(minicpm?.llama_server),
+		model: Boolean(minicpm?.gguf_present),
+		running: Boolean(minicpm?.running)
+	});
 
 	function capList(n: SmartNode): string {
 		const caps = n.capabilities;
@@ -91,7 +122,12 @@
 
 	function nodeLabel(n: SmartNode | null): string {
 		if (!n) return 'No node selected';
-		return String(n.label || n.instance_id || n.node_id || n.ip || 'Smart');
+		return String(n.label || n.instance_id || n.node_id || 'Smart');
+	}
+
+	function nodeWallet(n: SmartNode): string {
+		if (isLocal(n)) return 'runs on this computer';
+		return n.wallet_address ? `wallet ${shortAddr(n.wallet_address)}` : 'no wallet published';
 	}
 
 	function currentChatTitle(): string {
@@ -361,30 +397,52 @@
 	async function indexAttach() {
 		if (!attachPath || !selected) return;
 		if (isLocal(selected)) {
-			status = 'Index into a network Smart node, not Local MiniCPM.';
+			status = 'Local MiniCPM cannot index documents. Pick a network Smart node to index.';
 			return;
 		}
-		const est = await sidecarCall('index_estimate', { path: attachPath, node: selected });
-		if (est.ok === false) {
-			status = String(est.error);
-			return;
-		}
-		const cost = Number(est.estimated_cost || 0);
-		const note =
-			est.truncated || est.chunk_capped
-				? `Large file: only ~${est.chunks} chunks (first ~${est.max_chars} characters) will be indexed for Ask. Full encrypted storage is Files → Upload.`
-				: '';
-
 		const wallet = await sidecarCall('wallet_status');
 		if (wallet.has_wallet === false || wallet.ok === false) {
 			status = 'Create a wallet before indexing (Wallet section).';
 			return;
 		}
+		status = '';
+		indexConfirm = null;
+		indexNode = selected;
+		estimateJobId = await startJob('index_estimate', { path: attachPath, node: selected });
+		if (!estimateJobId) status = 'Could not start the cost estimate.';
+	}
 
+	$effect(() => {
+		const j = estimateJob;
+		if (!j || j.status === 'running') return;
+		untrack(() => {
+			estimateJobId = null;
+			sidecarCall('job_dismiss', { id: j.id }).then(refreshJobs);
+			const est = (j.result as Record<string, unknown>) || {};
+			if (est.ok === false) status = String(est.error);
+			else showIndexConfirm(est);
+		});
+	});
+
+	$effect(() => {
+		for (const j of indexJobs) {
+			const id = String(j.id);
+			if (j.status === 'running' || handledJobs.has(id)) continue;
+			handledJobs.add(id);
+			refreshWorkspace();
+		}
+	});
+
+	function showIndexConfirm(est: Record<string, unknown>) {
+		const cost = Number(est.estimated_cost || 0);
+		const note =
+			est.truncated || est.chunk_capped
+				? `Large file: only ~${est.chunks} chunks (first ~${est.max_chars} characters) will be indexed for Ask. Full encrypted storage is Files → Upload.`
+				: '';
 		let balance: number | null = null;
 		let balanceKnown = false;
-		const ledger = await sidecarCall('wallet_ledger');
-		if (ledger.ok !== false && ledger.balance != null && ledger.balance !== '') {
+		const ledger = live.ledger;
+		if (ledger && ledger.ok !== false && ledger.balance != null && ledger.balance !== '') {
 			const n = Number(ledger.balance);
 			if (!Number.isNaN(n)) {
 				balance = n;
@@ -416,34 +474,26 @@
 	}
 
 	async function proceedIndexConfirm() {
-		if (!indexConfirm || !selected || indexConfirm.insufficient) return;
-		const cost = indexConfirm.cost;
+		const node = indexNode || selected;
+		if (!indexConfirm || !node || indexConfirm.insufficient) return;
 		indexConfirm = null;
-		busy = true;
-		status = `Indexing in small batches (~${cost} BZT)…`;
-		const ready = await sidecarCall('embed_ensure');
-		if (ready.ok === false) {
-			busy = false;
-			status = String(ready.error);
-			return;
-		}
-		const result = (await sidecarCall('index_file', {
-			path: attachPath,
-			node: selected
-		})) as Record<string, unknown>;
-		busy = false;
-		if (result.ok === false) {
-			status = String(result.error);
-			return;
-		}
-		const fid = String(result.file_id || '');
-		if (fid) fileIds = [...new Set([...fileIds, fid])];
-		const cap =
-			result.truncated || result.chunk_capped
-				? ' · large file capped for Ask'
-				: '';
-		status = `Indexed ${fid.slice(0, 8)}… · ${result.chunks ?? 0} chunks · ${result.cost ?? 0} BZT${result.tx_hash ? ` · tx ${String(result.tx_hash).slice(0, 10)}` : ''}${cap}`;
-		await refreshWorkspace();
+		const id = await startJob('index', { path: attachPath, node });
+		status = id
+			? 'Indexing runs in the background: keep asking or switch sections. You will be notified when it finishes.'
+			: 'Could not start indexing.';
+		attachPath = '';
+	}
+
+	async function dismissJob(id: unknown) {
+		await sidecarCall('job_dismiss', { id });
+		await refreshJobs();
+	}
+
+	function jobSummary(j: Record<string, unknown>): string {
+		const r = (j.result as Record<string, unknown>) || {};
+		if (j.status === 'error') return `Failed: ${String(r.error || 'unknown error')}`;
+		const cap = r.truncated || r.chunk_capped ? ' · large file capped for Ask' : '';
+		return `${r.chunks ?? 0} chunks · ${r.cost ?? 0} BZT${r.tx_hash ? ` · tx ${String(r.tx_hash).slice(0, 10)}…` : ''}${cap}`;
 	}
 
 	function startPoll() {
@@ -461,7 +511,7 @@
 				const tot = r.total ? ` / ${(r.total / 1e6).toFixed(0)} MB` : '';
 				status = `Installing llama-server… ${((r.bytes || 0) / 1e6).toFixed(1)} MB${tot}`;
 			} else if (minicpm?.gguf_present && minicpm?.llama_server) {
-				status = 'Local MiniCPM runtime and model are ready. Click Start local.';
+				status = minicpm?.running ? '' : 'Runtime and model are ready. Start Local MiniCPM in step 3.';
 				if (poll) clearInterval(poll);
 				await refreshNodes();
 			} else if (!d.active && !r.active) {
@@ -487,20 +537,43 @@
 		startPoll();
 	}
 
+	let localBusy = $state('');
+
 	async function startMini() {
-		status = 'Starting llama-server…';
+		localBusy = 'Starting Local MiniCPM (up to 30 s)…';
 		const r = await sidecarCall('minicpm_start');
-		status = r.ok === false ? String(r.error) : 'Local MiniCPM is running (0 BZT).';
+		localBusy = '';
+		status = r.ok === false ? String(r.error) : 'Local MiniCPM is running. Questions are free.';
 		await refreshNodes();
+	}
+
+	async function stopMini() {
+		localBusy = 'Stopping…';
+		const r = await sidecarCall('minicpm_stop');
+		localBusy = '';
+		status = r.ok === false ? String(r.error) : 'Local MiniCPM stopped.';
+		minicpm = await sidecarCall('minicpm_status');
+	}
+
+	async function resetMini() {
+		if (!confirm('Stop Local MiniCPM and delete the downloaded model and runtime (about 1.5 GB)? You can set it up again afterwards.')) return;
+		localBusy = 'Resetting…';
+		const r = await sidecarCall('minicpm_reset');
+		localBusy = '';
+		status = r.ok === false ? String(r.error) : 'Local MiniCPM was reset. Start again from step 1.';
+		minicpm = await sidecarCall('minicpm_status');
+	}
+
+	function mb(n?: number): string {
+		return `${((n || 0) / 1e6).toFixed(0)} MB`;
 	}
 </script>
 
 <h1>Ask</h1>
 <p class="lead">
-	1) Create a wallet. 2) Pick a Smart node (or Local MiniCPM). 3) Ask anything — the node’s LLM
-	answers general prompts without indexing. 4) Optional: Index a document for document-grounded
-	Q&A (RAG). Large files are capped and embedded in small batches. Full encrypted storage is
-	Files → Upload, not Ask Index.
+	Pick a Smart node (or Local MiniCPM on this computer) and ask anything. Optionally index a document
+	on a network node so answers cite it; indexing runs in the background. Full encrypted file storage
+	is in Files.
 </p>
 
 {#if indexConfirm}
@@ -510,9 +583,10 @@
 			<p>
 				Index <strong>{indexConfirm.chunks}</strong> chunks at
 				<strong>~{indexConfirm.cost}</strong> BZT
-				({indexConfirm.price_per_embedding} BZT / embedding) on
-				<strong>{nodeLabel(selected)}</strong>?
+				({indexConfirm.price_per_embedding} BZT per chunk) on
+				<strong>{nodeLabel(indexNode || selected)}</strong>?
 			</p>
+			<p class="meta">Indexing runs in the background: you can keep asking and move between sections while it works.</p>
 			{#if indexConfirm.balanceKnown}
 				<p class="meta">
 					Wallet balance: <strong>{indexConfirm.balance}</strong> BZT
@@ -543,29 +617,39 @@
 
 <div class="ask-shell">
 	<aside class="ask-side">
-		<strong>Chats</strong>
-		<button class="ghost" onclick={startNewChat}>New chat</button>
+		<div class="row" style="justify-content:space-between">
+			<strong>Chats</strong>
+			<button class="ghost" onclick={startNewChat}>New chat</button>
+		</div>
+		{#if chats.length > CHAT_PAGE || chatQuery}
+			<input type="search" bind:value={chatQuery} oninput={() => (chatOffset = 0)} placeholder="Search chats…" />
+		{/if}
 		{#if chatId && !chatInList()}
 			<button class="node-card active ghost-chat" disabled>
 				<div>New conversation</div>
 				<div class="caps">unsaved · current</div>
 			</button>
 		{/if}
-		{#each chats as c}
+		{#each filteredChats.slice(chatOffset, chatOffset + CHAT_PAGE) as c (c.id)}
 			<button class="node-card" class:active={chatId === c.id} onclick={() => resumeChat(c)}>
 				<div>{c.title}</div>
-				<div class="caps">{c.total_cost_bzt ?? 0} BZT · {String(c.updated_at || '').slice(0, 16)}</div>
+				<div class="caps">{c.total_cost_bzt ?? 0} BZT · {String(c.updated_at || '').slice(0, 16).replace('T', ' ')}</div>
 			</button>
 		{/each}
+		{#if chatQuery && filteredChats.length === 0}<p class="meta">No chat matches.</p>{/if}
+		<Pager total={filteredChats.length} limit={CHAT_PAGE} bind:offset={chatOffset} />
 		{#if chats.length}
 			<button
 				class="ghost"
 				onclick={() => chatId && deleteChat(chatId)}
-				disabled={!chats.some((c) => c.id === chatId)}>Delete current</button
+				disabled={!chats.some((c) => c.id === chatId)}>Delete current chat</button
 			>
 		{/if}
 
-		<strong>Suitable nodes</strong>
+		<div class="row" style="justify-content:space-between; margin-top:0.5rem">
+			<strong>Suitable nodes</strong>
+			<button class="ghost" onclick={() => refreshNodes(draft)}>Refresh</button>
+		</div>
 		{#if needed.length}
 			<div class="row">
 				{#each needed as tag}
@@ -573,20 +657,24 @@
 				{/each}
 			</div>
 		{/if}
-		<button class="ghost" onclick={() => refreshNodes(draft)}>Refresh</button>
+		{#if nodes.length > NODE_PAGE || nodeQuery}
+			<input type="search" bind:value={nodeQuery} oninput={() => (nodeOffset = 0)} placeholder="Search nodes, models, wallets…" />
+		{/if}
 		{#if nodes.length === 0}
 			<p class="meta">Looking up Directory Smart nodes on the live network…</p>
 			{#if discoverError}<pre>{discoverError}</pre>{/if}
 		{/if}
-		{#each nodes as n}
+		{#each filteredNodes.slice(nodeOffset, nodeOffset + NODE_PAGE) as n (n.node_id)}
 			<button class="node-card" class:active={selected?.node_id === n.node_id} onclick={() => pick(n)}>
-				<div>{n.label || n.node_id || n.ip}</div>
+				<div>{nodeLabel(n)}</div>
+				<div class="caps mono">{nodeWallet(n)}</div>
 				<div class="caps">
 					{capList(n)}
 					{#if n.llm_model} · {n.llm_model}{/if}
-					· {n.price_per_query ?? 0} BZT / query
-					{#if n.price_per_embedding != null} · {n.price_per_embedding} BZT / embed{/if}
+					· {n.price_per_query ?? 0} BZT / question
+					{#if n.price_per_embedding != null && !isLocal(n)} · {n.price_per_embedding} BZT / indexed chunk{/if}
 					{#if n.reachable === false} · unreachable{/if}
+					{#if isLocal(n)} · {localSteps.running ? 'running' : 'not running'}{/if}
 					{#if n.llm_available === false || n.available === false}
 						· LLM unavailable
 						{#if n.llm_unavailable_reason}
@@ -596,22 +684,7 @@
 				</div>
 			</button>
 		{/each}
-		{#if minicpm}
-			<div class="caps">
-				GGUF {minicpm.gguf_present ? 'present' : 'missing'} · llama-server
-				{minicpm.llama_server ? 'installed' : 'not installed'} ·
-				{minicpm.running ? 'running' : 'stopped'}
-			</div>
-			<div class="row">
-				<button class="ghost" onclick={installRuntime} disabled={Boolean(runtimeInfo().active)}>
-					{runtimeInfo().active ? 'Installing runtime…' : 'Install local runtime'}
-				</button>
-				<button class="ghost" onclick={downloadMini} disabled={Boolean(downloadInfo().active)}>
-					{downloadInfo().active ? 'Downloading…' : 'Download model'}
-				</button>
-				<button class="ghost" onclick={startMini}>Start local</button>
-			</div>
-		{/if}
+		<Pager total={filteredNodes.length} limit={NODE_PAGE} bind:offset={nodeOffset} />
 		{#if selected && !isLocal(selected)}
 			<p class="meta">
 				{workspaceFiles.length} document(s) indexed on this node.
@@ -630,11 +703,70 @@
 				<strong>{nodeLabel(selected)}</strong>
 			</div>
 		</div>
+
+		{#if isLocal(selected) && minicpm}
+			<div class="stack" style="padding:1rem 1.25rem; border-bottom:1px solid var(--border)">
+				<div class="row" style="justify-content:space-between">
+					<strong>Local MiniCPM setup</strong>
+					<button class="danger" onclick={resetMini} disabled={Boolean(localBusy) || Boolean(downloadInfo().active) || Boolean(runtimeInfo().active) || !(localSteps.runtime || localSteps.model)}>Reset</button>
+				</div>
+				<p class="meta" style="margin:0">
+					Runs a small language model on this computer: free and private, no indexing. Do the three steps once; afterwards only step 3 is needed.
+				</p>
+				<div class="steps" style="margin:0">
+					<div class="step" class:done={localSteps.runtime}>
+						<div class="step-num">{localSteps.runtime ? '✓' : '1'}</div>
+						<div class="stack" style="gap:0.4rem; flex:1">
+							<strong>Install the runtime</strong>
+							<p>llama-server, about 30 MB, installed inside the app.</p>
+							{#if runtimeInfo().active}
+								<Progress done={runtimeInfo().bytes} total={runtimeInfo().total} label={`${mb(runtimeInfo().bytes)}${runtimeInfo().total ? ` of ${mb(runtimeInfo().total)}` : ''}`} />
+							{:else if runtimeInfo().error}
+								<p class="error">{runtimeInfo().error}</p>
+							{/if}
+							<button class="ghost" onclick={installRuntime} disabled={localSteps.runtime || Boolean(runtimeInfo().active)}>
+								{localSteps.runtime ? 'Installed' : runtimeInfo().active ? 'Installing…' : 'Install runtime'}
+							</button>
+						</div>
+					</div>
+					<div class="step" class:done={localSteps.model}>
+						<div class="step-num">{localSteps.model ? '✓' : '2'}</div>
+						<div class="stack" style="gap:0.4rem; flex:1">
+							<strong>Download the model</strong>
+							<p>MiniCPM 2B, about 1.4 GB, stored on this computer.</p>
+							{#if downloadInfo().active}
+								<Progress done={downloadInfo().bytes} total={downloadInfo().total} label={`${mb(downloadInfo().bytes)}${downloadInfo().total ? ` of ${mb(downloadInfo().total)}` : ''}`} />
+							{:else if downloadInfo().error}
+								<p class="error">{downloadInfo().error}</p>
+							{/if}
+							<button class="ghost" onclick={downloadMini} disabled={localSteps.model || Boolean(downloadInfo().active)}>
+								{localSteps.model ? 'Downloaded' : downloadInfo().active ? 'Downloading…' : 'Download model'}
+							</button>
+						</div>
+					</div>
+					<div class="step" class:done={localSteps.running}>
+						<div class="step-num">{localSteps.running ? '✓' : '3'}</div>
+						<div class="stack" style="gap:0.4rem; flex:1">
+							<strong>{localSteps.running ? 'Running' : 'Start'}</strong>
+							<p>{localSteps.running ? 'Ready for questions on this computer.' : 'Starts the model; it also starts by itself on your first question.'}</p>
+							{#if localBusy}<Progress label={localBusy} />{/if}
+							{#if localSteps.running}
+								<button class="ghost" onclick={stopMini} disabled={Boolean(localBusy) || minicpm.owned === false}>Stop</button>
+								{#if minicpm.owned === false}<p class="meta">Started outside this app; stop it there.</p>{/if}
+							{:else}
+								<button class="primary" onclick={startMini} disabled={!localSteps.runtime || !localSteps.model || Boolean(localBusy)}>Start</button>
+							{/if}
+						</div>
+					</div>
+				</div>
+			</div>
+		{/if}
+
 		<div class="messages">
 			{#if messages.length === 0}
 				<p class="lead">
-					Estimated cost for the selected node: <strong>{estimatedQueryCost()} BZT</strong> per Ask
-					(0 for Local MiniCPM). Indexing bills separately at the node’s embedding price.
+					Estimated cost for the selected node: <strong>{estimatedQueryCost()} BZT</strong> per question
+					(0 for Local MiniCPM). Indexing bills separately at the node’s per-chunk price.
 				</p>
 			{/if}
 			{#each messages as m}
@@ -669,6 +801,19 @@
 		</div>
 		<div class="composer">
 			{#if status}<div class="meta">{status}</div>{/if}
+			{#each indexJobs as j (j.id)}
+				<div class="row" style="align-items:flex-start">
+					<div class="grow">
+						{#if j.status === 'running'}
+							<Progress done={Number(j.done)} total={Number(j.total)} label={`${String(j.label)} · ${String(j.stage)}${Number(j.total) ? ` (${j.done}/${j.total} chunks)` : ''}`} />
+						{:else}
+							<span class="chip {j.status === 'done' ? 'ok' : 'danger'}">{j.status === 'done' ? 'indexed' : 'failed'}</span>
+							<span class="meta">{String(j.label).replace('Indexing ', '')} · {jobSummary(j)}</span>
+						{/if}
+					</div>
+					{#if j.status !== 'running'}<button class="ghost" onclick={() => dismissJob(j.id)}>Dismiss</button>{/if}
+				</div>
+			{/each}
 			{#if selected && !isLocal(selected)}
 				<div class="row">
 					<span class="meta" style="margin:0">
@@ -691,12 +836,17 @@
 						<p class="meta" style="margin:0">No documents indexed on this node yet. Index one below.</p>
 					{/if}
 				{/if}
+				<div class="row">
+					<input type="text" class="grow" bind:value={attachPath} placeholder="File to index (PDF or text)" />
+					<button class="ghost" onclick={browseFile}>Browse</button>
+					<button class="ghost" onclick={indexAttach} disabled={!attachPath || Boolean(estimateJobId)}>Index into node</button>
+				</div>
+				{#if estimateJob}
+					<Progress done={Number(estimateJob.done)} total={Number(estimateJob.total)} label={`Calculating the cost · ${String(estimateJob.stage)}`} />
+				{/if}
+			{:else if isLocal(selected)}
+				<p class="meta" style="margin:0">Local MiniCPM answers from its own knowledge; documents can only be indexed on network Smart nodes.</p>
 			{/if}
-			<div class="row">
-				<input type="text" class="grow" bind:value={attachPath} placeholder="File to index (PDF or text)" />
-				<button class="ghost" onclick={browseFile}>Browse</button>
-				<button class="ghost" onclick={indexAttach} disabled={busy}>Index into node</button>
-			</div>
 			<textarea
 				bind:value={draft}
 				placeholder="Message…"

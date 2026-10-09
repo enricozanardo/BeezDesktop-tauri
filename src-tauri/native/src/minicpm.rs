@@ -36,6 +36,20 @@ fn empty_state() -> DownloadState {
 
 static DOWNLOAD: Lazy<Mutex<DownloadState>> = Lazy::new(|| Mutex::new(empty_state()));
 static RUNTIME: Lazy<Mutex<DownloadState>> = Lazy::new(|| Mutex::new(empty_state()));
+static SERVER: Lazy<Mutex<Option<std::process::Child>>> = Lazy::new(|| Mutex::new(None));
+
+/// True while the llama-server process started by this app is still alive.
+fn server_owned() -> bool {
+    let mut guard = SERVER.lock().unwrap();
+    match guard.as_mut().map(|c| c.try_wait()) {
+        Some(Ok(None)) => true,
+        Some(_) => {
+            *guard = None;
+            false
+        }
+        None => false,
+    }
+}
 
 fn gguf_path() -> PathBuf {
     if let Ok(named) = std::env::var("BEEZ_MINICPM_GGUF") {
@@ -136,6 +150,7 @@ pub fn status() -> Value {
         "llama_tag": LLAMA_TAG,
         "port": PORT,
         "running": running,
+        "owned": server_owned(),
         "price_per_query": 0,
         "download_url": HF_GGUF,
         "download": snapshot(&DOWNLOAD),
@@ -354,7 +369,7 @@ pub fn start_server() -> Value {
         Ok(f) => f,
         Err(e) => return json!({"ok": false, "error": e.to_string()}),
     };
-    if let Err(e) = std::process::Command::new(bin)
+    let child = std::process::Command::new(bin)
         .args([
             "-m",
             gguf,
@@ -368,18 +383,65 @@ pub fn start_server() -> Value {
         ])
         .stdout(std::process::Stdio::from(logf))
         .stderr(std::process::Stdio::from(errf))
-        .spawn()
-    {
-        return json!({"ok": false, "error": e.to_string()});
+        .spawn();
+    match child {
+        Ok(c) => *SERVER.lock().unwrap() = Some(c),
+        Err(e) => return json!({"ok": false, "error": e.to_string()}),
     }
     for _ in 0..30 {
         thread::sleep(std::time::Duration::from_secs(1));
+        if !server_owned() {
+            return json!({"ok": false, "error": "llama-server exited during startup", "log": log.display().to_string()});
+        }
         let now = status();
         if now.get("running").and_then(|v| v.as_bool()) == Some(true) {
             return json!({"ok": true, "started": true, "status": now});
         }
     }
     json!({"ok": false, "error": "llama-server did not become ready", "log": log.display().to_string()})
+}
+
+/// Stop the llama-server process this app started.
+pub fn stop_server() -> Value {
+    let child = SERVER.lock().unwrap().take();
+    match child {
+        Some(mut c) => {
+            let _ = c.kill();
+            let _ = c.wait();
+            json!({"ok": true, "stopped": true, "status": status()})
+        }
+        None if status()["running"] == true => json!({
+            "ok": false,
+            "error": format!("A llama-server on port {PORT} was started outside Beez Desktop; stop it there."),
+        }),
+        None => json!({"ok": true, "stopped": false, "status": status()}),
+    }
+}
+
+/// Stop the server and delete the downloaded model and runtime so setup can start over.
+pub fn reset() -> Value {
+    if DOWNLOAD.lock().unwrap().active || RUNTIME.lock().unwrap().active {
+        return json!({"ok": false, "error": "Wait for the running download to finish first."});
+    }
+    let stopped = stop_server();
+    if stopped["ok"] != true {
+        return stopped;
+    }
+    let models = models_dir();
+    let mut removed = Vec::new();
+    let gguf = gguf_path();
+    if gguf.starts_with(&models) && gguf.is_file() {
+        let _ = fs::remove_file(&gguf);
+        removed.push(gguf.display().to_string());
+    }
+    let runtime = models.join("llama-runtime");
+    if runtime.is_dir() {
+        let _ = fs::remove_dir_all(&runtime);
+        removed.push(runtime.display().to_string());
+    }
+    *DOWNLOAD.lock().unwrap() = empty_state();
+    *RUNTIME.lock().unwrap() = empty_state();
+    json!({"ok": true, "removed": removed, "status": status()})
 }
 
 pub fn chat(messages: &Value, max_tokens: u32) -> Value {

@@ -1,6 +1,6 @@
 [package]
 name = "beez-native"
-version = "0.1.28"
+version = "0.1.29"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "Native Beez Desktop Two core (wallet, HTTP, embeddings)"
@@ -18,6 +18,7 @@ fastembed = "4"
 hex = "0.4"
 hkdf = "0.12"
 hmac = "0.12"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 k256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 openssl = { version = "0.10", features = ["vendored"] }
 native-tls = { version = "0.2", features = ["vendored"] }

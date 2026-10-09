@@ -11,6 +11,7 @@ use crate::crypto::{
 };
 use crate::http;
 use crate::nodes::{http_url_for, list_all_nodes};
+use crate::preview::{blurred_preview, is_previewable};
 use crate::tx::{
     build_asset_price_tx, build_asset_visibility_tx, build_ownership_accept_tx,
     build_ownership_cancel_tx, build_ownership_reject_tx, build_ownership_request_tx,
@@ -294,7 +295,7 @@ pub fn upload(params: &Value) -> Value {
         storage_cost += *count as f64 * price * duration as f64;
     }
     let guardian = pick_guardian();
-    let tx = match build_upload_tx(
+    let mut tx = match build_upload_tx(
         &wallet,
         &file_id,
         &file_name,
@@ -315,6 +316,22 @@ pub fn upload(params: &Value) -> Value {
         Ok(t) => t,
         Err(e) => return fail("tx_build", e),
     };
+    let want_preview = params
+        .get("preview")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(visibility == "public");
+    let mut preview_note = None;
+    if want_preview && is_previewable(&extension) {
+        match blurred_preview(&plaintext) {
+            Ok(Value::Object(fields)) => {
+                if let Some(obj) = tx.as_object_mut() {
+                    obj.extend(fields);
+                }
+            }
+            Ok(_) => {}
+            Err(e) => preview_note = Some(e),
+        }
+    }
     let sent = send_raw_tx_timeout(&tx, 45);
     if sent.get("ok") != Some(&json!(true)) {
         return json!({
@@ -334,6 +351,8 @@ pub fn upload(params: &Value) -> Value {
         "guardian_dam_id": guardian,
         "tx_hash": tx.get("tx_hash"),
         "visibility": visibility,
+        "has_preview": tx.get("preview_data").is_some(),
+        "preview_error": preview_note,
     })
 }
 
@@ -578,11 +597,22 @@ pub fn marketplace(params: &Value) -> Value {
     let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).min(200);
     let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+    let mut args = vec![
+        ("query", query.to_string()),
+        ("limit", limit.to_string()),
+        ("offset", offset.to_string()),
+    ];
+    let tags = params.get("tags").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if !tags.is_empty() {
+        args.push(("tags", tags.to_string()));
+    }
+    for key in ["min_price", "max_price"] {
+        if let Some(p) = params.get(key).and_then(|v| v.as_f64()).filter(|p| *p >= 0.0) {
+            args.push((key, p.to_string()));
+        }
+    }
     for base in crate::nodes::chain_http_urls() {
-        let Ok(url) = reqwest::Url::parse_with_params(
-            &format!("{base}/api/marketplace/assets"),
-            &[("query", query.to_string()), ("limit", limit.to_string()), ("offset", offset.to_string())],
-        ) else {
+        let Ok(url) = reqwest::Url::parse_with_params(&format!("{base}/api/marketplace/assets"), &args) else {
             continue;
         };
         if let Ok(data) = http::get_json_connect(url.as_str(), 10, 1200) {
@@ -594,6 +624,30 @@ pub fn marketplace(params: &Value) -> Value {
         }
     }
     fail("chain", "no chain node returned marketplace assets")
+}
+
+/// Blurred preview image recorded in an asset's upload transaction.
+pub fn preview(params: &Value) -> Value {
+    let file_id = params.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
+    if Uuid::parse_str(file_id).is_err() {
+        return fail("args", "file_id must be a UUID");
+    }
+    let mut last = "no chain node reachable".to_string();
+    for base in crate::nodes::chain_http_urls() {
+        match http::get_json_connect(&format!("{base}/api/assets/{file_id}/preview"), 20, 1200) {
+            Ok(data) => {
+                return json!({
+                    "ok": true,
+                    "has_preview": data.get("has_preview").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "preview_data": data.get("preview_data"),
+                    "width": data.get("preview_width"),
+                    "height": data.get("preview_height"),
+                });
+            }
+            Err(e) => last = e,
+        }
+    }
+    fail("chain", last)
 }
 
 pub fn ownership_pending() -> Value {

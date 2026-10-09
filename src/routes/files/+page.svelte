@@ -1,6 +1,7 @@
 <script lang="ts">
-	import { sidecarCall } from '#lib';
+	import { sidecarCall, live, onLiveTick, refreshLive, Pager } from '#lib';
 	import { open } from '@tauri-apps/plugin-dialog';
+	import { untrack } from 'svelte';
 
 	type MyFile = {
 		file_id: string;
@@ -46,7 +47,7 @@
 		message?: string;
 	};
 
-	type PendingTx = { type?: string; file_id?: string; tx_hash?: string };
+	type PendingTx = { type?: string; file_id?: string; tx_hash?: string; request_id?: string };
 
 	type Tab = 'store' | 'mine' | 'market' | 'transfers';
 
@@ -54,6 +55,17 @@
 	const FEE = { upload: 0.1, request: 0.05, accept: 0.05, reject: 0.01, cancel: 0.01, listing: 0.01 };
 	const YEARS = [3, 5, 7, 10];
 	const NODE_COUNTS = [1, 3, 6];
+	const PREVIEWABLE = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tif', 'tiff'];
+	const MINE_PAGE = 8;
+	const MARKET_PAGE = 12;
+	const ACTED_KEY = 'beez.files.acted.v1';
+
+	const ACTED_LABEL: Record<string, string> = {
+		ownership_accept: 'Accepted',
+		ownership_seller_accept: 'Sale approved',
+		ownership_reject: 'Declined',
+		ownership_cancel: 'Withdrawn'
+	};
 
 	const PENDING_LABEL: Record<string, string> = {
 		upload: 'Upload waiting for the next block',
@@ -78,27 +90,54 @@
 	let nodeCount = $state(3);
 	let price = $state(0);
 	let tags = $state('');
+	let withPreview = $state(true);
 	let estimate = $state<Record<string, unknown> | null>(null);
 
 	let files = $state<MyFile[]>([]);
 	let filesError = $state('');
 	let filter = $state('');
+	let mineKind = $state<'all' | 'private' | 'public' | 'received'>('all');
+	let mineSort = $state<'new' | 'old' | 'name' | 'size'>('new');
+	let mineOffset = $state(0);
 	let details = $state<string | null>(null);
+	let previews = $state<Record<string, string | null>>({});
+	let acted = $state<Record<string, string>>(loadActed());
 	let listingEdit = $state<{ fileId: string; visibility: string; price: number } | null>(null);
 	let sendEdit = $state<{ fileId: string; to: string; price: number; message: string } | null>(null);
 
 	let marketQuery = $state('');
+	let marketTags = $state('');
+	let marketMin = $state<number | null>(null);
+	let marketMax = $state<number | null>(null);
+	let marketOffset = $state(0);
 	let market = $state<MarketAsset[]>([]);
 	let marketTotal = $state<number | null>(null);
 	let marketError = $state('');
 
-	let incoming = $state<OwnershipReq[]>([]);
-	let outgoing = $state<OwnershipReq[]>([]);
+	const incoming = $derived(live.incoming as OwnershipReq[]);
+	const outgoing = $derived(live.outgoing as OwnershipReq[]);
 
 	const fileName = $derived(path.split(/[\\/]/).pop() || '');
-	const shown = $derived(
-		files.filter((f) => (f.file_name || f.file_id).toLowerCase().includes(filter.trim().toLowerCase()))
-	);
+	const pathExt = $derived((fileName.split('.').pop() || '').toLowerCase());
+	const shown = $derived.by(() => {
+		const q = filter.trim().toLowerCase();
+		const list = files.filter((f) => {
+			if (q && !`${f.file_name || f.file_id} ${(f.tags || []).join(' ')}`.toLowerCase().includes(q)) return false;
+			if (mineKind === 'private') return f.visibility !== 'public';
+			if (mineKind === 'public') return f.visibility === 'public';
+			if (mineKind === 'received') return Boolean(f.acquired_via);
+			return true;
+		});
+		const by: Record<typeof mineSort, (a: MyFile, b: MyFile) => number> = {
+			new: (a, b) => Number(b.block_height ?? Infinity) - Number(a.block_height ?? Infinity),
+			old: (a, b) => Number(a.block_height ?? Infinity) - Number(b.block_height ?? Infinity),
+			name: (a, b) => String(a.file_name || '').localeCompare(String(b.file_name || '')),
+			size: (a, b) => Number(b.file_size || 0) - Number(a.file_size || 0)
+		};
+		return list.sort(by[mineSort]);
+	});
+	const minePage = $derived(shown.slice(mineOffset, mineOffset + MINE_PAGE));
+	const pendingRequestIds = $derived(new Set(pendingTxs.map((t) => t.request_id).filter(Boolean) as string[]));
 	const listedCount = $derived(files.filter((f) => f.visibility === 'public').length);
 	const totalBytes = $derived(files.reduce((s, f) => s + Number(f.file_size || 0), 0));
 	const pendingByFile = $derived.by(() => {
@@ -155,12 +194,53 @@
 		return r.current_owner_address === address;
 	}
 
-	async function refreshWallet() {
-		const ledger = await sidecarCall('wallet_ledger');
+	function loadActed(): Record<string, string> {
+		try {
+			return JSON.parse(localStorage.getItem(ACTED_KEY) || '{}');
+		} catch {
+			return {};
+		}
+	}
+
+	function decision(r: OwnershipReq): string | null {
+		if (acted[r.request_id]) return acted[r.request_id];
+		return pendingRequestIds.has(r.request_id) ? 'Decision sent' : null;
+	}
+
+	function pruneActed() {
+		if (!live.lastUpdate) return;
+		const open = new Set([...incoming, ...outgoing].map((r) => r.request_id));
+		const kept = Object.fromEntries(Object.entries(acted).filter(([id]) => open.has(id)));
+		if (Object.keys(kept).length !== Object.keys(acted).length) {
+			acted = kept;
+			localStorage.setItem(ACTED_KEY, JSON.stringify(acted));
+		}
+	}
+
+	function isPreviewable(name: string | undefined, ext?: string): boolean {
+		const e = (ext || String(name || '').split('.').pop() || '').replace('.', '').toLowerCase();
+		return PREVIEWABLE.includes(e);
+	}
+
+	async function loadPreview(fileId: string) {
+		if (fileId in previews) return;
+		previews[fileId] = null;
+		const r = await sidecarCall('asset_preview', { file_id: fileId });
+		if (r.ok && r.has_preview && r.preview_data) previews[fileId] = `data:image/jpeg;base64,${r.preview_data}`;
+	}
+
+	function syncWallet() {
+		const ledger = live.ledger;
+		if (!ledger) return;
 		address = String(ledger.address || '');
 		const n = Number(ledger.balance);
 		balance = ledger.ok !== false && ledger.balance != null && !Number.isNaN(n) ? n : null;
 		pendingTxs = Array.isArray(ledger.pending) ? (ledger.pending as PendingTx[]) : [];
+	}
+
+	async function refreshWallet() {
+		await refreshLive();
+		syncWallet();
 	}
 
 	async function loadFiles() {
@@ -169,30 +249,50 @@
 		files = (r.uploads as MyFile[]) || [];
 	}
 
-	async function loadTransfers() {
-		const p = await sidecarCall('ownership_pending');
-		if (p.ok === false) return;
-		incoming = (p.incoming as OwnershipReq[]) || [];
-		outgoing = (p.outgoing as OwnershipReq[]) || [];
-	}
-
 	async function searchMarket() {
-		const r = await sidecarCall('asset_marketplace', { query: marketQuery, limit: 100 });
+		const r = await sidecarCall('asset_marketplace', {
+			query: marketQuery,
+			tags: marketTags,
+			min_price: marketMin ?? -1,
+			max_price: marketMax ?? -1,
+			limit: MARKET_PAGE,
+			offset: marketOffset
+		});
 		marketError = r.ok === false ? errText(r.error) : '';
 		market = (r.assets as MarketAsset[]) || [];
 		marketTotal = r.total == null ? null : Number(r.total);
 	}
 
-	async function refreshAll() {
-		await refreshWallet();
-		await Promise.all([loadFiles(), loadTransfers(), searchMarket()]);
+	function newMarketSearch() {
+		marketOffset = 0;
+		searchMarket();
 	}
 
-	let loaded = $state(false);
 	$effect(() => {
-		if (loaded) return;
-		loaded = true;
-		refreshAll();
+		syncWallet();
+		pruneActed();
+	});
+
+	$effect(() => {
+		untrack(() => {
+			loadFiles();
+			searchMarket();
+		});
+		return onLiveTick(async () => {
+			await Promise.all([loadFiles(), tab === 'market' ? searchMarket() : Promise.resolve()]);
+		});
+	});
+
+	$effect(() => {
+		const ids = [
+			...minePage.filter((f) => isPreviewable(f.file_name)).map((f) => f.file_id),
+			...market.filter((a) => isPreviewable(a.file_name, a.extension)).map((a) => a.file_id)
+		];
+		untrack(() => ids.forEach(loadPreview));
+	});
+
+	$effect(() => {
+		withPreview = visibility === 'public';
 	});
 
 	$effect(() => {
@@ -240,14 +340,17 @@
 			duration,
 			node_count: nodeCount,
 			price: visibility === 'public' ? Number(price) : 0,
-			tags: parseTags(tags)
+			tags: parseTags(tags),
+			preview: withPreview && PREVIEWABLE.includes(pathExt)
 		});
 		busy = false;
 		if (r.ok === false) {
 			status = errText(r.error);
 			return;
 		}
-		status = `Stored “${r.file_name}” in ${r.chunks} encrypted chunk(s) for ${bzt(Number(r.cost))}. It shows as confirmed after the next block (~5 min).`;
+		status =
+			`Stored “${r.file_name}” in ${r.chunks} encrypted chunk(s) for ${bzt(Number(r.cost))}. It shows as confirmed after the next block (~5 min).` +
+			(r.has_preview ? ' A blurred preview was attached.' : r.preview_error ? ` No preview: ${r.preview_error}.` : '');
 		path = '';
 		tags = '';
 		price = 0;
@@ -373,7 +476,7 @@
 		question: string,
 		done: string
 	) {
-		if (busy || !confirm(question)) return;
+		if (busy || decision(r) || !confirm(question)) return;
 		busy = true;
 		status = 'Submitting…';
 		const res = await sidecarCall(method, {
@@ -383,7 +486,13 @@
 			buyer_address: r.new_owner_address
 		});
 		busy = false;
-		status = res.ok === false ? errText(res.error) : `${done} It takes effect after the next block (~5 min).`;
+		if (res.ok === false) {
+			status = errText(res.error);
+			return;
+		}
+		acted = { ...acted, [r.request_id]: ACTED_LABEL[method] };
+		localStorage.setItem(ACTED_KEY, JSON.stringify(acted));
+		status = `${done} It takes effect after the next block (~5 min).`;
 		await refreshWallet();
 	}
 </script>
@@ -513,6 +622,16 @@
 					</label>
 				</div>
 			{/if}
+			{#if path && PREVIEWABLE.includes(pathExt)}
+				<label class="row" style="gap:0.5rem">
+					<input type="checkbox" bind:checked={withPreview} />
+					<span>Attach a blurred preview</span>
+				</label>
+				<p class="meta" style="margin:0">
+					A small, heavily blurred copy of the image is stored on chain in clear so buyers can see roughly
+					what it is. It is public, so leave it off for sensitive images.
+				</p>
+			{/if}
 		</div>
 
 		<div class="card stack">
@@ -558,8 +677,20 @@
 		<div class="stat"><div class="value">{listedCount}</div><div class="label">On the Marketplace</div></div>
 		<div class="stat"><div class="value">{balance == null ? '—' : bzt(balance)}</div><div class="label">Wallet balance</div></div>
 	</div>
-	<div class="row" style="margin-bottom:1rem">
-		<input type="search" class="grow" bind:value={filter} placeholder="Search your files by name" />
+	<div class="toolbar" style="margin-bottom:1rem">
+		<input type="search" class="grow" bind:value={filter} oninput={() => (mineOffset = 0)} placeholder="Search by name or tag" />
+		<select bind:value={mineKind} onchange={() => (mineOffset = 0)}>
+			<option value="all">All files</option>
+			<option value="private">Private</option>
+			<option value="public">On the Marketplace</option>
+			<option value="received">Received from others</option>
+		</select>
+		<select bind:value={mineSort}>
+			<option value="new">Newest first</option>
+			<option value="old">Oldest first</option>
+			<option value="name">Name</option>
+			<option value="size">Largest first</option>
+		</select>
 		<button class="ghost" onclick={() => Promise.all([loadFiles(), refreshWallet()])} disabled={busy}>Refresh</button>
 	</div>
 	{#if filesError}<p class="meta error">Could not load your files: {filesError}</p>{/if}
@@ -568,16 +699,19 @@
 			No files yet. <button class="ghost" onclick={() => (tab = 'store')}>Store your first file</button>
 		</p>
 	{:else if shown.length === 0}
-		<p class="meta">No file name matches “{filter}”.</p>
+		<p class="meta">No file matches these filters.</p>
 	{/if}
 
 	<div class="stack">
-		{#each shown as f (f.file_id)}
+		{#each minePage as f (f.file_id)}
 			{@const confirmed = f.status !== 'pending'}
 			{@const locked = Boolean(f.transfer_locked)}
 			<div class="card stack">
 				<div class="row" style="justify-content:space-between">
 					<div class="row">
+						{#if previews[f.file_id]}
+							<img class="preview-thumb" src={previews[f.file_id]} alt="Blurred preview of {f.file_name}" />
+						{/if}
 						<h2 style="margin:0">{f.file_name || f.file_id}</h2>
 						<span class="chip {confirmed ? 'ok' : 'warn'}">{confirmed ? 'Confirmed' : 'Waiting for block'}</span>
 						{#if f.visibility === 'public'}
@@ -681,31 +815,44 @@
 			</div>
 		{/each}
 	</div>
+	<Pager total={shown.length} limit={MINE_PAGE} bind:offset={mineOffset} />
 {:else if tab === 'market'}
 	<p class="meta">
-		Files other wallets have listed. You see the name, size, tags and asking price; the content stays
-		encrypted until the owner approves your request and the payment goes through.
+		Files other wallets have listed. You see the name, size, tags, asking price and, for images, a
+		blurred preview; the content stays encrypted until the owner approves your request and the payment
+		goes through.
 	</p>
-	<div class="row" style="margin-bottom:1rem">
+	<div class="toolbar" style="margin-bottom:1rem">
 		<input
 			type="search"
 			class="grow"
 			bind:value={marketQuery}
 			placeholder="Search by file name"
-			onkeydown={(e) => e.key === 'Enter' && searchMarket()}
+			onkeydown={(e) => e.key === 'Enter' && newMarketSearch()}
 		/>
-		<button class="primary" onclick={searchMarket} disabled={busy}>Search</button>
+		<input
+			type="text"
+			bind:value={marketTags}
+			placeholder="Tags, comma separated"
+			onkeydown={(e) => e.key === 'Enter' && newMarketSearch()}
+		/>
+		<input type="number" min="0" step="0.1" bind:value={marketMin} placeholder="Min BZT" style="width:7rem" />
+		<input type="number" min="0" step="0.1" bind:value={marketMax} placeholder="Max BZT" style="width:7rem" />
+		<button class="primary" onclick={newMarketSearch} disabled={busy}>Search</button>
 	</div>
 	{#if marketError}<p class="meta error">Could not load the Marketplace: {marketError}</p>{/if}
 	{#if market.length === 0 && !marketError}
-		<p class="meta">Nothing listed{marketQuery ? ` matches “${marketQuery}”` : ' yet'}.</p>
+		<p class="meta">Nothing listed{marketQuery || marketTags ? ' matches these filters' : ' yet'}.</p>
 	{:else}
-		<p class="meta">{marketTotal ?? market.length} file(s) listed{marketQuery ? ` matching “${marketQuery}”` : ''}.</p>
+		<p class="meta">{marketTotal ?? market.length} file(s) listed{marketQuery || marketTags || marketMin != null || marketMax != null ? ' matching these filters' : ''}.</p>
 	{/if}
 	<div class="listings">
 		{#each market as a (a.file_id)}
 			{@const mine = a.owner_address === address}
 			<div class="listing" style="cursor:default">
+				{#if previews[a.file_id]}
+					<img class="preview-img" src={previews[a.file_id]} alt="Blurred preview of {a.file_name}" />
+				{/if}
 				<div class="row" style="justify-content:space-between">
 					<strong>{a.file_name}{a.extension && !String(a.file_name).endsWith(a.extension) ? a.extension : ''}</strong>
 					{#if mine}<span class="chip muted">Yours</span>{/if}
@@ -726,6 +873,7 @@
 			</div>
 		{/each}
 	</div>
+	<Pager total={marketTotal ?? market.length} limit={MARKET_PAGE} bind:offset={marketOffset} onchange={searchMarket} />
 {:else}
 	<p class="meta">
 		A transfer needs both sides: one wallet proposes (an owner's offer or a buyer's request), the other
@@ -759,7 +907,9 @@
 					{#if r.message}<span class="meta" style="margin:0">“{r.message}”</span>{/if}
 				</div>
 				<div class="row">
-					{#if iAmSeller(r)}
+					{#if decision(r)}
+						<span class="chip warn">{decision(r)} · waiting for the next block</span>
+					{:else if iAmSeller(r)}
 						<button class="primary" disabled={busy}
 							onclick={() => act(r, 'ownership_seller_accept', `Sell “${r.file_name}” to ${short(r.new_owner_address)} for ${bzt(p)}?`, 'Sale approved.')}
 						>Approve sale</button>
@@ -796,12 +946,16 @@
 						</span>
 					{/if}
 				</div>
-				<button class="ghost" disabled={busy}
-					onclick={() =>
-						iAmSeller(r)
-							? act(r, 'ownership_cancel', `Withdraw your offer for “${r.file_name}”? Fee ${bzt(FEE.cancel)}.`, 'Offer withdrawn.')
-							: act(r, 'ownership_reject', `Withdraw your request for “${r.file_name}”? Fee ${bzt(FEE.reject)}.`, 'Request withdrawn.')}
-				>Withdraw</button>
+				{#if decision(r)}
+					<span class="chip warn">{decision(r)} · waiting for the next block</span>
+				{:else}
+					<button class="ghost" disabled={busy}
+						onclick={() =>
+							iAmSeller(r)
+								? act(r, 'ownership_cancel', `Withdraw your offer for “${r.file_name}”? Fee ${bzt(FEE.cancel)}.`, 'Offer withdrawn.')
+								: act(r, 'ownership_reject', `Withdraw your request for “${r.file_name}”? Fee ${bzt(FEE.reject)}.`, 'Request withdrawn.')}
+					>Withdraw</button>
+				{/if}
 			</div>
 		{/each}
 	</div>

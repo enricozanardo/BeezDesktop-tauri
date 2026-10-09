@@ -330,6 +330,23 @@ pub fn chat(params: &Value) -> Value {
     result
 }
 
+/// Receives (stage, done, total) updates from long-running operations.
+pub trait ProgressSink {
+    fn report(&self, stage: &str, done: u64, total: u64);
+}
+
+impl<F: Fn(&str, u64, u64)> ProgressSink for F {
+    fn report(&self, stage: &str, done: u64, total: u64) {
+        self(stage, done, total)
+    }
+}
+
+impl ProgressSink for crate::jobs::Progress {
+    fn report(&self, stage: &str, done: u64, total: u64) {
+        self.set(stage, done, total)
+    }
+}
+
 /// Soft caps so indexing a PDF does not OOM the desktop (ONNX embeds in tiny batches).
 const MAX_INDEX_CHARS: usize = 250_000;
 const MAX_INDEX_CHUNKS: usize = 400;
@@ -344,6 +361,10 @@ fn prepare_index_text(mut text: String) -> (String, bool) {
 }
 
 pub fn index_file(params: &Value) -> Value {
+    index_file_with(params, &|_: &str, _: u64, _: u64| {})
+}
+
+pub fn index_file_with(params: &Value, progress: &dyn ProgressSink) -> Value {
     let path = PathBuf::from(params.get("path").and_then(|v| v.as_str()).unwrap_or(""));
     if !path.is_file() {
         return json!({"ok": false, "error": format!("file not found: {}", path.display())});
@@ -352,6 +373,7 @@ pub fn index_file(params: &Value) -> Value {
     if node_is_local(&node) {
         return json!({"ok": false, "error": "Local MiniCPM does not index network workspaces"});
     }
+    progress.report("Reading text", 0, 0);
     let raw = match read_text(&path) {
         Ok(t) => t,
         Err(e) => return fail("extract", e),
@@ -368,6 +390,7 @@ pub fn index_file(params: &Value) -> Value {
         Ok(k) => k,
         Err(e) => return fail("crypto", e),
     };
+    progress.report("Loading embedding model", 0, 0);
     if let Err(e) = embed::ensure() {
         return fail("embed_failed", e);
     }
@@ -394,6 +417,8 @@ pub fn index_file(params: &Value) -> Value {
     let mut total_indexed = 0u64;
     let mut total_cost = 0.0;
     let mut last_result = json!({});
+    let total_chunks = chunks.len() as u64;
+    progress.report("Embedding and uploading", 0, total_chunks);
     // Embed + encrypt + upload in small batches so peak RAM stays bounded.
     for (batch_i, batch) in chunks.chunks(INDEX_UPLOAD_BATCH).enumerate() {
         let embeddings = match embed::embed_texts(batch) {
@@ -436,7 +461,10 @@ pub fn index_file(params: &Value) -> Value {
         total_indexed += result.get("chunks_indexed").and_then(|v| v.as_u64()).unwrap_or(0);
         total_cost += result.get("total_cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
         last_result = result;
+        let sent = ((batch_i + 1) * INDEX_UPLOAD_BATCH).min(chunks.len()) as u64;
+        progress.report("Embedding and uploading", sent, total_chunks);
     }
+    progress.report("Recording payment on chain", total_chunks, total_chunks);
     let info = http::get_json(&format!("{}/info", smart_url(&node)), 5).unwrap_or(json!({}));
     let node_id = info
         .get("node_id")
@@ -472,6 +500,10 @@ pub fn index_file(params: &Value) -> Value {
 }
 
 pub fn index_estimate(params: &Value) -> Value {
+    index_estimate_with(params, &|_: &str, _: u64, _: u64| {})
+}
+
+pub fn index_estimate_with(params: &Value, progress: &dyn ProgressSink) -> Value {
     let path = PathBuf::from(params.get("path").and_then(|v| v.as_str()).unwrap_or(""));
     if !path.is_file() {
         return fail("file_not_found", format!("file not found: {}", path.display()));
@@ -480,12 +512,15 @@ pub fn index_estimate(params: &Value) -> Value {
     if node_is_local(&node) {
         return fail("local_no_index", "Local MiniCPM does not index network workspaces");
     }
+    progress.report("Reading text", 0, 3);
     let raw = match read_text(&path) {
         Ok(t) => t,
         Err(e) => return fail("extract", e),
     };
+    progress.report("Splitting into chunks", 1, 3);
     let (text, truncated) = prepare_index_text(raw);
     let mut chunks = split_into_rag_chunks(&text, 800, 100, 50);
+    progress.report("Pricing", 2, 3);
     let full_chunks = chunks.len();
     let chunk_capped = chunks.len() > MAX_INDEX_CHUNKS;
     if chunk_capped {
