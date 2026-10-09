@@ -20,7 +20,7 @@
 	import '#lib/theme.css';
 
 	let { children } = $props();
-	let version = $state('0.1.29');
+	let version = $state('0.2.0');
 	let panelOpen = $state(false);
 
 	const links = [

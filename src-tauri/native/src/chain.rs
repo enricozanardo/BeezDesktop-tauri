@@ -9,7 +9,10 @@ use serde_json::{json, Value};
 use crate::http;
 use crate::nodes::chain_http_urls;
 use crate::paths::{data_dir, APP_WALLET_NAME};
-use crate::tx::{build_transfer_tx, send_raw_tx};
+use crate::crypto::{open_memo, seal_memo};
+use crate::files::fetch_wallet_pubkey;
+use crate::tx::{build_transfer_tx, send_raw_tx, MAX_MEMO_CHARS};
+use crate::wallet::{pubkey_to_address, Wallet};
 use crate::wallet_store::{load_or_migrate, require_wallet};
 
 const HISTORY_PAGE: u64 = 200;
@@ -25,14 +28,67 @@ fn first_chain_json(path: &str) -> Result<(String, Value), String> {
 }
 
 fn first_chain_json_timeout(path: &str, timeout_secs: u64) -> Result<(String, Value), String> {
-    let mut last = "no chain node reachable".to_string();
+    let mut errors = Vec::new();
     for base in chain_http_urls() {
         match http::get_json_connect(&format!("{base}{path}"), timeout_secs, 900) {
             Ok(v) => return Ok((base, v)),
-            Err(e) => last = format!("{base}: {e}"),
+            Err(e) => errors.push(format!("{base}: {e}")),
         }
     }
-    Err(last)
+    Err(describe_errors(&errors))
+}
+
+/// One readable reason for a failed round over all chain nodes.
+///
+/// The local development node is tried last, so its "connection refused" says nothing about the
+/// public nodes; prefer their answers, and name throttling explicitly.
+fn describe_errors(errors: &[String]) -> String {
+    if errors.iter().any(|e| e.contains("429") || e.to_lowercase().contains("rate limit")) {
+        return "The chain nodes are limiting requests from this computer for a moment; retrying automatically.".into();
+    }
+    errors
+        .iter()
+        .find(|e| !e.contains("127.0.0.1") && !e.contains("localhost"))
+        .or(errors.first())
+        .cloned()
+        .unwrap_or_else(|| "no chain node reachable".into())
+}
+
+/// The two wallets of a transfer as (sender, recipient), if `me` is one of them.
+fn transfer_parties(t: &Value, me: &str) -> Option<(String, String)> {
+    if let (Some(s), Some(r)) = (t["sender"].as_str(), t["recipient"].as_str()) {
+        return (s == me || r == me).then(|| (s.to_string(), r.to_string()));
+    }
+    let other = t["counterparty"].as_str()?.to_string();
+    match t["direction"].as_str()? {
+        "sent" => Some((me.to_string(), other)),
+        "received" => Some((other, me.to_string())),
+        _ => None,
+    }
+}
+
+/// Decrypt the `memo_enc` of transfers this wallet is part of into `memo`.
+fn reveal_memos(wallet: &Wallet, txs: &mut [Value]) {
+    for t in txs.iter_mut() {
+        let Some(envelope) = t.get("memo_enc").and_then(|v| v.as_str()).map(str::to_string) else { continue };
+        let Some((sender, recipient)) = transfer_parties(t, &wallet.address) else { continue };
+        let other = if sender == wallet.address { &recipient } else { &sender };
+        let signed_pub = t["pub"]
+            .as_str()
+            .and_then(|h| hex::decode(h).ok())
+            .filter(|k| other == &sender && k.len() == 64 && pubkey_to_address(k) == sender);
+        let other_pub = match signed_pub {
+            Some(k) => Ok(k),
+            None => fetch_wallet_pubkey(other),
+        };
+        match other_pub.and_then(|pk| open_memo(&wallet.privkey, &pk, &sender, &recipient, &envelope)) {
+            Ok(text) => {
+                t["memo"] = json!(text);
+                t["memo_private"] = json!(true);
+            }
+            Err(e) => t["memo_error"] = json!(e),
+        }
+    }
 }
 
 fn wrap(res: Result<(String, Value), String>) -> Value {
@@ -74,18 +130,17 @@ pub fn transaction_detail(params: &Value) -> Value {
     if !is_hex64(hash) {
         return json!({"ok": false, "error": "A transaction hash has 64 hexadecimal characters."});
     }
-    if let Ok((source, data)) = first_chain_json(&format!("/api/blockchain/transaction/{hash}")) {
-        return json!({"ok": true, "source": source, "status": "confirmed", "transaction": data.get("transaction")});
+    let (source, status, mut tx) = match first_chain_json(&format!("/api/blockchain/transaction/{hash}")) {
+        Ok((source, data)) => (source, "confirmed", data["transaction"].clone()),
+        Err(_) => match first_chain_json(&format!("/api/mempool/transaction/{hash}")) {
+            Ok((source, data)) if data["found"] == true => (source, "pending", data["transaction"].clone()),
+            _ => return json!({"ok": false, "error": "No block or pending transaction has this hash."}),
+        },
+    };
+    if let Ok((Some(wallet), _)) = load_or_migrate() {
+        reveal_memos(&wallet, std::slice::from_mut(&mut tx));
     }
-    match first_chain_json(&format!("/api/mempool/transaction/{hash}")) {
-        Ok((source, data)) if data["found"] == true => json!({
-            "ok": true,
-            "source": source,
-            "status": "pending",
-            "transaction": data["transaction"],
-        }),
-        _ => json!({"ok": false, "error": "No block or pending transaction has this hash."}),
-    }
+    json!({"ok": true, "source": source, "status": status, "transaction": tx})
 }
 
 /// Resolve a free-text explorer query into a block, transaction or wallet.
@@ -243,7 +298,9 @@ fn history_matches(t: &Value, kind: &str, q: &str) -> bool {
     let ok_kind = match kind {
         "sent" => dir == "sent",
         "received" => dir == "received",
-        "messages" => t.get("memo").and_then(|v| v.as_str()).map(|m| !m.is_empty()).unwrap_or(false),
+        "messages" => ["memo", "memo_enc"]
+            .iter()
+            .any(|k| t.get(*k).and_then(|v| v.as_str()).map(|m| !m.is_empty()).unwrap_or(false)),
         _ => true,
     };
     if !ok_kind {
@@ -289,7 +346,8 @@ pub fn wallet_history(params: &Value) -> Value {
     let q = params.get("query").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20).clamp(1, 200) as usize;
     let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    let all = cache["transactions"].as_array().cloned().unwrap_or_default();
+    let mut all = cache["transactions"].as_array().cloned().unwrap_or_default();
+    reveal_memos(&wallet, &mut all);
     let matching: Vec<&Value> = all.iter().filter(|t| history_matches(t, kind, &q)).collect();
     json!({
         "ok": true,
@@ -313,20 +371,22 @@ pub fn wallet_ledger() -> Value {
     };
     spawn_history_sync(wallet.address.clone());
     let cache = load_history(&wallet.address);
-    let recent: Vec<Value> = cache["transactions"].as_array().cloned().unwrap_or_default().into_iter().take(30).collect();
-    let mut last = "no chain node reachable".to_string();
+    let mut recent: Vec<Value> = cache["transactions"].as_array().cloned().unwrap_or_default().into_iter().take(30).collect();
+    reveal_memos(&wallet, &mut recent);
+    let mut errors = Vec::new();
     for base in chain_http_urls() {
         let bal_url = format!("{base}/balance?address={}", wallet.address);
         match http::get_json_connect(&bal_url, 6, 900) {
             Ok(bal) => {
-                let pending = http::get_json_connect(
+                let mut pending: Vec<Value> = http::get_json_connect(
                     &format!("{base}/api/mempool/transactions?address={}&limit=50", wallet.address),
                     6,
                     900,
                 )
                 .ok()
-                .and_then(|v| v.get("pending_transactions").cloned())
-                .unwrap_or(json!([]));
+                .and_then(|v| v.get("pending_transactions").and_then(|p| p.as_array()).cloned())
+                .unwrap_or_default();
+                reveal_memos(&wallet, &mut pending);
                 return json!({
                     "pending": pending,
                     "ok": true,
@@ -340,10 +400,10 @@ pub fn wallet_ledger() -> Value {
                     "syncing": HISTORY_SYNCING.load(Ordering::SeqCst),
                 });
             }
-            Err(e) => last = format!("{base}: {e}"),
+            Err(e) => errors.push(format!("{base}: {e}")),
         }
     }
-    json!({"ok": false, "has_wallet": true, "address": wallet.address, "error": last, "transactions": recent})
+    json!({"ok": false, "has_wallet": true, "address": wallet.address, "error": describe_errors(&errors), "transactions": recent})
 }
 
 /// Send BZT and/or a text message to another wallet.
@@ -358,17 +418,35 @@ pub fn send_transfer(params: &Value) -> Value {
     if amount <= 0.0 && memo.is_empty() {
         return json!({"ok": false, "error": "Enter an amount, a message, or both."});
     }
-    let tx = match build_transfer_tx(&wallet, recipient, amount, memo) {
+    if memo.chars().count() > MAX_MEMO_CHARS {
+        return json!({"ok": false, "error": format!("Messages are limited to {MAX_MEMO_CHARS} characters.")});
+    }
+    let mut memo_enc = String::new();
+    if !memo.is_empty() {
+        let recipient_pub = match fetch_wallet_pubkey(recipient) {
+            Ok(k) => k,
+            Err(_) => {
+                return json!({"ok": false, "error": "This wallet has not made a transaction yet, so its public key is not on chain and a message to it cannot be encrypted. You can still send BZT without a message."})
+            }
+        };
+        memo_enc = match seal_memo(&wallet.privkey, &recipient_pub, &wallet.address, recipient, memo) {
+            Ok(e) => e,
+            Err(e) => return json!({"ok": false, "error": e}),
+        };
+    }
+    let tx = match build_transfer_tx(&wallet, recipient, amount, &memo_enc) {
         Ok(t) => t,
         Err(e) => return json!({"ok": false, "error": e}),
     };
     let res = send_raw_tx(&tx);
     if res["ok"] == true {
-        json!({"ok": true, "tx_hash": tx["tx_hash"]})
+        json!({"ok": true, "tx_hash": tx["tx_hash"], "encrypted": !memo_enc.is_empty()})
     } else {
         let body = res.pointer("/error/body").and_then(|v| v.as_str()).unwrap_or("");
         let reason = if body.contains("Insufficient") {
             "Not enough BZT for this amount plus the 0.01 BZT network fee.".to_string()
+        } else if body.contains("429") || res.to_string().to_lowercase().contains("rate limit") {
+            "The chain nodes are limiting requests from this computer for a moment. Try again in a minute.".to_string()
         } else if body.is_empty() {
             res["error"].to_string()
         } else {

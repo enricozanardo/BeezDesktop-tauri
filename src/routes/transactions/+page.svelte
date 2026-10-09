@@ -85,13 +85,13 @@
 		if (!canSend) return;
 		const a = Number(amount) || 0;
 		const what = [a > 0 ? `${a} BZT` : '', memo.trim() ? `the message “${memo.trim()}”` : ''].filter(Boolean).join(' and ');
-		if (!confirm(`Send ${what} to ${to.trim()}?\n\nNetwork fee: ${NETWORK_FEE} BZT. Total debited: ${sendTotal.toFixed(2)} BZT.\nMessages are stored on the public chain.`)) return;
+		if (!confirm(`Send ${what} to ${to.trim()}?\n\nNetwork fee: ${NETWORK_FEE} BZT. Total debited: ${sendTotal.toFixed(2)} BZT.${memo.trim() ? '\nThe message is encrypted: only you and the recipient can read it.' : ''}`)) return;
 		sending = true;
 		sendErr = sendMsg = '';
 		const r = await sidecarCall('send_transfer', { recipient: to.trim(), amount: a, memo: memo.trim() });
 		sending = false;
 		if (r.ok) {
-			sendMsg = `Sent. It appears under Pending now and in Activity after the next block. Transaction ${String(r.tx_hash).slice(0, 16)}…`;
+			sendMsg = `Sent${r.encrypted ? ' with an encrypted message' : ''}. It appears under Pending now and in Activity after the next block. Transaction ${String(r.tx_hash).slice(0, 16)}…`;
 			amount = null;
 			memo = '';
 			refreshLive();
@@ -133,7 +133,11 @@
 		</div>
 	</div>
 	<p class="meta mono">{String(ledger?.address || '')}</p>
-	{#if ledger?.ok === false}<p class="error">{String(ledger.error)}</p>{/if}
+	{#if ledger?.ok === false}
+		<p class="error">Could not read your balance: {String(ledger.error)}</p>
+	{:else if ledger?.stale}
+		<p class="meta">Showing the last known balance. {String(ledger.staleError)}</p>
+	{/if}
 
 	<div class="tabs">
 		<button class:active={tab === 'activity'} onclick={() => (tab = 'activity')}>Activity</button>
@@ -174,8 +178,10 @@
 					<dd>{Number.isFinite(balance) ? (balance - sendTotal).toFixed(6) : '—'} BZT</dd>
 				</dl>
 				<p class="callout">
-					Messages travel inside a signed transaction: the recipient sees them in Activity and gets a
-					notification. They are public on the chain, so do not send secrets.
+					Messages travel inside a signed transaction and are end-to-end encrypted with keys derived from
+					your wallet and the recipient's: the chain stores only ciphertext, and only the two of you can read
+					it. The recipient must have made at least one transaction so their public key is on chain. Any
+					send, message-only included, costs the {NETWORK_FEE} BZT network fee.
 				</p>
 			</div>
 		</div>
@@ -189,7 +195,7 @@
 							<span class="chip warn">pending</span>
 							<strong>{txLabel(tx)}</strong>
 							<span class="sub">{pendingAmount(tx)} · {String(tx.tx_hash || '').slice(0, 16)}…</span>
-							{#if tx.memo}<span class="memo">{String(tx.memo)}</span>{/if}
+							{#if tx.memo}<span class="memo" title={tx.memo_private ? 'End-to-end encrypted' : 'Sent in clear by an older app version'}>{String(tx.memo)}</span>{/if}
 						</li>
 					{/each}
 				</ul>
@@ -232,7 +238,10 @@
 							{when(tx)} · <a href={`/blockchain?block=${tx.block_height}`}>block {String(tx.block_height ?? '—')}</a>
 						</span>
 						{#if tx.memo}
-							<span class="memo">{String(tx.memo)}</span>
+							<span class="memo" title={tx.memo_private ? 'End-to-end encrypted' : 'Sent in clear by an older app version'}>{String(tx.memo)}</span>
+							{#if tx.memo_private}<span class="chip muted">private</span>{/if}
+						{:else if tx.memo_enc}
+							<span class="meta">Encrypted message that could not be opened: {String(tx.memo_error || '')}</span>
 						{/if}
 						{#if (tx.type === 'normal' || tx.type === 'transfer') && tx.direction === 'received'}
 							<button class="ghost" onclick={() => replyTo(tx)}>Reply</button>

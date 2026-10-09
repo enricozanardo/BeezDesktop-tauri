@@ -1,5 +1,7 @@
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use hkdf::Hkdf;
 use k256::ecdsa::signature::hazmat::PrehashSigner;
 use k256::ecdsa::{Signature, SigningKey};
@@ -12,6 +14,8 @@ use sha2::Sha256;
 
 pub const DOMAIN_FILE_ENC: &[u8] = b"beez-file-enc-v1";
 pub const DOMAIN_ECDH_WRAP: &[u8] = b"beez-ecdh-wrap-v1";
+pub const DOMAIN_MEMO: &[u8] = b"beez-memo-v1";
+pub const MEMO_PREFIX: &str = "enc1:";
 
 pub fn derive_encryption_key(privkey: &[u8; 32]) -> Result<[u8; 32], String> {
     let hk = Hkdf::<Sha256>::new(None, privkey);
@@ -25,6 +29,54 @@ pub fn derive_encryption_key(privkey: &[u8; 32]) -> Result<[u8; 32], String> {
 ///
 /// Matches `shared.client_core.rekey.derive_shared_key_ecdh`.
 pub fn derive_shared_key_ecdh(own_privkey: &[u8; 32], other_pubkey_xy: &[u8]) -> Result<[u8; 32], String> {
+    derive_ecdh_key(own_privkey, other_pubkey_xy, DOMAIN_ECDH_WRAP)
+}
+
+/// Encrypt a transfer message so only the two wallets of the transfer can read it.
+///
+/// Static-static ECDH gives sender and recipient the same key; the addresses are
+/// bound as associated data so the envelope cannot be replayed on another pair.
+pub fn seal_memo(
+    own_privkey: &[u8; 32],
+    other_pubkey_xy: &[u8],
+    sender: &str,
+    recipient: &str,
+    text: &str,
+) -> Result<String, String> {
+    let key = derive_ecdh_key(own_privkey, other_pubkey_xy, DOMAIN_MEMO)?;
+    let mut nonce = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let aad = format!("{sender}|{recipient}");
+    let ct = Aes256Gcm::new((&key).into())
+        .encrypt(Nonce::from_slice(&nonce), Payload { msg: text.as_bytes(), aad: aad.as_bytes() })
+        .map_err(|e| format!("aes-gcm: {e}"))?;
+    let mut raw = nonce.to_vec();
+    raw.extend_from_slice(&ct);
+    Ok(format!("{MEMO_PREFIX}{}", B64.encode(raw)))
+}
+
+/// Decrypt a message sealed by [`seal_memo`], as either party of the transfer.
+pub fn open_memo(
+    own_privkey: &[u8; 32],
+    other_pubkey_xy: &[u8],
+    sender: &str,
+    recipient: &str,
+    envelope: &str,
+) -> Result<String, String> {
+    let body = envelope.strip_prefix(MEMO_PREFIX).ok_or("unknown message format")?;
+    let raw = B64.decode(body).map_err(|e| format!("message base64: {e}"))?;
+    if raw.len() < 12 + 16 {
+        return Err("message too short".into());
+    }
+    let key = derive_ecdh_key(own_privkey, other_pubkey_xy, DOMAIN_MEMO)?;
+    let aad = format!("{sender}|{recipient}");
+    let plain = Aes256Gcm::new((&key).into())
+        .decrypt(Nonce::from_slice(&raw[..12]), Payload { msg: &raw[12..], aad: aad.as_bytes() })
+        .map_err(|_| "message could not be decrypted".to_string())?;
+    String::from_utf8(plain).map_err(|_| "message is not valid text".into())
+}
+
+fn derive_ecdh_key(own_privkey: &[u8; 32], other_pubkey_xy: &[u8], domain: &[u8]) -> Result<[u8; 32], String> {
     if other_pubkey_xy.len() != 64 {
         return Err(format!(
             "other pubkey must be 64-byte uncompressed x||y, got {}",
@@ -40,7 +92,7 @@ pub fn derive_shared_key_ecdh(own_privkey: &[u8; 32], other_pubkey_xy: &[u8]) ->
     let shared_x = shared.raw_secret_bytes();
     let hk = Hkdf::<Sha256>::new(None, shared_x.as_slice());
     let mut out = [0u8; 32];
-    hk.expand(DOMAIN_ECDH_WRAP, &mut out)
+    hk.expand(domain, &mut out)
         .map_err(|e| format!("ecdh hkdf: {e}"))?;
     Ok(out)
 }
@@ -278,5 +330,18 @@ mod tests {
         let file_key = [0xABu8; 32];
         let (wrapped, nonce) = wrap_file_key(&file_key, &ab).unwrap();
         assert_eq!(unwrap_file_key(&wrapped, &nonce, &ba).unwrap(), file_key);
+    }
+
+    #[test]
+    fn memo_readable_by_both_parties_only() {
+        let (a, b, eve) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32]);
+        let pub_a = pubkey_xy_from_privkey(&a).unwrap();
+        let pub_b = pubkey_xy_from_privkey(&b).unwrap();
+        let env = seal_memo(&a, &pub_b, "bezA", "bezB", "Invoice 42 — paid ✓").unwrap();
+        assert!(env.starts_with(MEMO_PREFIX) && !env.contains("Invoice"));
+        assert_eq!(open_memo(&b, &pub_a, "bezA", "bezB", &env).unwrap(), "Invoice 42 — paid ✓");
+        assert_eq!(open_memo(&a, &pub_b, "bezA", "bezB", &env).unwrap(), "Invoice 42 — paid ✓");
+        assert!(open_memo(&eve, &pub_a, "bezA", "bezB", &env).is_err());
+        assert!(open_memo(&b, &pub_a, "bezB", "bezA", &env).is_err());
     }
 }

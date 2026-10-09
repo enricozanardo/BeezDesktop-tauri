@@ -1,3 +1,4 @@
+import { untrack } from 'svelte';
 import { sidecarCall } from './sidecar';
 
 type Rec = Record<string, unknown>;
@@ -312,7 +313,11 @@ export async function refreshLive() {
 	live.refreshing = true;
 	try {
 		const [ledger, pend] = await Promise.all([sidecarCall('wallet_ledger'), sidecarCall('ownership_pending')]);
-		live.ledger = ledger;
+		const prev = live.ledger;
+		live.ledger =
+			ledger.ok === false && prev && prev.ok !== false && prev.address === ledger.address
+				? { ...prev, stale: true, staleError: ledger.error }
+				: ledger;
 		if (pend.ok) {
 			live.incoming = (pend.incoming as Rec[]) || [];
 			live.outgoing = (pend.outgoing as Rec[]) || [];
@@ -348,13 +353,15 @@ function restartTimer() {
 
 /** Start background polling (idempotent); call once from the root layout. */
 export function startLive() {
-	if (timer) return;
-	refreshLive();
-	refreshJobs();
-	restartTimer();
-	jobTimer = setInterval(() => {
-		if (live.jobs.some((j) => j.status === 'running')) refreshJobs();
-	}, JOB_POLL_MS);
+	untrack(() => {
+		if (timer) return;
+		refreshLive();
+		refreshJobs();
+		restartTimer();
+		jobTimer = setInterval(() => {
+			if (live.jobs.some((j) => j.status === 'running')) refreshJobs();
+		}, JOB_POLL_MS);
+	});
 }
 
 /** Start a native background job and begin tracking it. */

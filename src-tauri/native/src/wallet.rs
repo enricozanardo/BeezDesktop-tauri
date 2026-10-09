@@ -49,9 +49,13 @@ impl Wallet {
 }
 
 pub fn privkey_to_address(privkey: &[u8; 32]) -> Result<String, String> {
-    let pub_bytes = pubkey_from_privkey(privkey)?;
-    let hash = Sha256::digest(pub_bytes);
-    Ok(format!("bez{}", bs58::encode(&hash[..20]).into_string()))
+    Ok(pubkey_to_address(&pubkey_from_privkey(privkey)?))
+}
+
+/// Wallet address of a 64-byte x||y public key.
+pub fn pubkey_to_address(pubkey_xy: &[u8]) -> String {
+    let hash = Sha256::digest(pubkey_xy);
+    format!("bez{}", bs58::encode(&hash[..20]).into_string())
 }
 
 fn pubkey_from_privkey(privkey: &[u8; 32]) -> Result<[u8; 64], String> {

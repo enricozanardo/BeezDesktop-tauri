@@ -619,9 +619,11 @@ pub fn build_asset_visibility_tx(
 }
 
 pub const MAX_MEMO_CHARS: usize = 280;
+/// Chain limit for the `memo_enc` envelope (`validation.MAX_MEMO_ENC_CHARS`).
+const MAX_MEMO_ENC_CHARS: usize = 2048;
 
-/// BZT transfer, optionally carrying a signed text memo.
-pub fn build_transfer_tx(wallet: &Wallet, recipient: &str, amount_bzt: f64, memo: &str) -> Result<Value, String> {
+/// BZT transfer, optionally carrying a message sealed with [`crate::crypto::seal_memo`].
+pub fn build_transfer_tx(wallet: &Wallet, recipient: &str, amount_bzt: f64, memo_enc: &str) -> Result<Value, String> {
     if !recipient.starts_with("bez") {
         return Err("Recipient must be a bez… wallet address.".into());
     }
@@ -631,8 +633,8 @@ pub fn build_transfer_tx(wallet: &Wallet, recipient: &str, amount_bzt: f64, memo
     if !amount_bzt.is_finite() || amount_bzt < 0.0 {
         return Err("Amount must be zero or more.".into());
     }
-    if memo.chars().count() > MAX_MEMO_CHARS {
-        return Err(format!("Messages are limited to {MAX_MEMO_CHARS} characters."));
+    if !memo_enc.is_empty() && (!memo_enc.starts_with(crate::crypto::MEMO_PREFIX) || memo_enc.len() > MAX_MEMO_ENC_CHARS) {
+        return Err("The message must be encrypted and at most 280 characters.".into());
     }
     let timestamp = chain_timestamp();
     let amount = format!("{amount_bzt:.6} BZT");
@@ -643,8 +645,8 @@ pub fn build_transfer_tx(wallet: &Wallet, recipient: &str, amount_bzt: f64, memo
     tx.insert("sender".into(), json!(wallet.address));
     tx.insert("recipient".into(), json!(recipient));
     tx.insert("amount".into(), json!(amount));
-    if !memo.is_empty() {
-        tx.insert("memo".into(), json!(memo));
+    if !memo_enc.is_empty() {
+        tx.insert("memo_enc".into(), json!(memo_enc));
     }
     tx.insert("timestamp".into(), json!(timestamp));
     tx.insert("tx_hash".into(), json!(sha256_hex(payload.as_bytes())));
@@ -653,7 +655,7 @@ pub fn build_transfer_tx(wallet: &Wallet, recipient: &str, amount_bzt: f64, memo
         &mut tx,
         &wallet.privkey,
         &pubhex,
-        &["type", "nonce", "sender", "recipient", "amount", "memo", "timestamp", "tx_hash"],
+        &["type", "nonce", "sender", "recipient", "amount", "memo", "memo_enc", "timestamp", "tx_hash"],
     )?;
     Ok(Value::Object(tx))
 }
@@ -791,13 +793,15 @@ mod tests {
     #[test]
     fn transfer_hash_excludes_memo_and_validates_inputs() {
         let w = Wallet::generate().unwrap();
-        let tx = build_transfer_tx(&w, "bezFriend", 2.5, "Thanks!").unwrap();
+        let tx = build_transfer_tx(&w, "bezFriend", 2.5, "enc1:AAAA").unwrap();
         let payload = format!("{}|bezFriend|2.500000 BZT|{}", w.address, field(&tx, "timestamp"));
         assert_eq!(field(&tx, "tx_hash"), sha256_hex(payload.as_bytes()));
-        assert_eq!(field(&tx, "memo"), "Thanks!");
-        assert!(build_transfer_tx(&w, "bezFriend", 0.0, "").unwrap().get("memo").is_none());
+        assert_eq!(field(&tx, "memo_enc"), "enc1:AAAA");
+        assert!(tx.get("memo").is_none());
+        assert!(build_transfer_tx(&w, "bezFriend", 0.0, "").unwrap().get("memo_enc").is_none());
         assert!(build_transfer_tx(&w, &w.address, 1.0, "").is_err());
         assert!(build_transfer_tx(&w, "bezFriend", -1.0, "").is_err());
-        assert!(build_transfer_tx(&w, "bezFriend", 1.0, &"x".repeat(MAX_MEMO_CHARS + 1)).is_err());
+        assert!(build_transfer_tx(&w, "bezFriend", 1.0, "Thanks in clear").is_err());
+        assert!(build_transfer_tx(&w, "bezFriend", 1.0, &format!("enc1:{}", "A".repeat(MAX_MEMO_ENC_CHARS))).is_err());
     }
 }

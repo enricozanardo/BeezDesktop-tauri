@@ -7,7 +7,7 @@
 	type Rec = Record<string, unknown>;
 
 	const PAGE = 20;
-	const HIDDEN_FIELDS = new Set(['sig', 'pub', 'signature']);
+	const HIDDEN_FIELDS = new Set(['sig', 'pub', 'signature', 'memo_private', 'memo_error']);
 	const PARTY_FIELDS = [
 		'sender', 'recipient', 'uploader', 'wallet_address', 'smart_node_wallet', 'buyer_address',
 		'seller_address', 'current_owner', 'new_owner', 'owner_address', 'dam_address', 'target_node_address'
@@ -200,7 +200,7 @@
 							<span>{value(t)}</span>
 							<span class="sub">{parties(t)} · {String(t.tx_hash || '').slice(0, 16)}…</span>
 						</button>
-						{#if t.memo}<span class="memo">{String(t.memo)}</span>{/if}
+						{#if t.memo_enc}<span class="chip muted">Encrypted message</span>{:else if t.memo}<span class="memo">{String(t.memo)}</span>{/if}
 					</li>
 				{/each}
 			</ul>
@@ -217,9 +217,16 @@
 			{#if tx.block_height != null}
 				<p><button class="ghost" onclick={() => goto(`/blockchain?block=${tx?.block_height}`)}>Open block #{Number(tx.block_height).toLocaleString()}</button></p>
 			{/if}
-			{#if tx.memo}<p class="memo">{String(tx.memo)}</p>{/if}
+			{#if tx.memo_private}
+				<p class="memo">{String(tx.memo)}</p>
+				<p class="meta">Message decrypted on this device. On chain it is stored encrypted; only the sender and the recipient can read it.</p>
+			{:else if tx.memo_enc}
+				<p class="meta">Encrypted message: only the sender and the recipient can read it.{#if tx.memo_error} ({String(tx.memo_error)}){/if}</p>
+			{:else if tx.memo}
+				<p class="memo">{String(tx.memo)}</p>
+			{/if}
 			<dl class="kv">
-				{#each Object.entries(tx).filter(([k]) => !HIDDEN_FIELDS.has(k)) as [k, v] (k)}
+				{#each Object.entries(tx).filter(([k]) => !HIDDEN_FIELDS.has(k) && !(tx?.memo_private && k === 'memo')) as [k, v] (k)}
 					<dt>{k.replaceAll('_', ' ')}</dt>
 					<dd class:mono={typeof v === 'string'}>
 						{#if typeof v === 'string' && v.startsWith('bez')}<a href={`/blockchain?wallet=${v}`}>{v}</a>{:else}{fieldText(v)}{/if}
@@ -249,7 +256,7 @@
 							<span>{String(t.amount ?? '')}</span>
 							<span class="sub">block {String(t.block_height)} · {String(t.tx_hash).slice(0, 16)}…</span>
 						</button>
-						{#if t.memo}<span class="memo">{String(t.memo)}</span>{/if}
+						{#if t.memo_enc}<span class="chip muted">Encrypted message</span>{:else if t.memo}<span class="memo">{String(t.memo)}</span>{/if}
 					</li>
 				{/each}
 			</ul>

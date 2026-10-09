@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use base64::engine::general_purpose::STANDARD;
+use once_cell::sync::Lazy;
 use base64::Engine;
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -356,24 +359,35 @@ pub fn upload(params: &Value) -> Value {
     })
 }
 
-fn fetch_wallet_pubkey(address: &str) -> Result<Vec<u8>, String> {
+static PUBKEYS: Lazy<Mutex<HashMap<String, Vec<u8>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Public key a wallet revealed on chain, checked against its address so a node cannot substitute its own.
+pub fn fetch_wallet_pubkey(address: &str) -> Result<Vec<u8>, String> {
+    if let Some(k) = PUBKEYS.lock().unwrap().get(address) {
+        return Ok(k.clone());
+    }
+    let mut last = format!("could not fetch pubkey for {address}");
     for base in crate::nodes::chain_http_urls() {
         let url = format!("{base}/api/blockchain/wallet/{address}/pubkey");
-        if let Ok(data) = http::get_json_connect(&url, 8, 1200) {
-            if let Some(hex_str) = data.get("pubkey").and_then(|v| v.as_str()) {
-                let bytes = hex::decode(hex_str.trim()).map_err(|e| format!("pubkey hex: {e}"))?;
-                if bytes.len() == 64 || (bytes.len() == 65 && bytes[0] == 0x04) {
-                    return Ok(if bytes.len() == 65 {
-                        bytes[1..].to_vec()
-                    } else {
-                        bytes
-                    });
-                }
-                return Err(format!("unexpected pubkey length {}", bytes.len()));
+        let Ok(data) = http::get_json_connect(&url, 8, 1200) else { continue };
+        let Some(hex_str) = data.get("pubkey").and_then(|v| v.as_str()) else { continue };
+        let Ok(bytes) = hex::decode(hex_str.trim()) else { continue };
+        let xy = match bytes.len() {
+            64 => bytes,
+            65 if bytes[0] == 0x04 => bytes[1..].to_vec(),
+            n => {
+                last = format!("unexpected pubkey length {n}");
+                continue;
             }
+        };
+        if crate::wallet::pubkey_to_address(&xy) != address {
+            last = format!("{base} returned a public key that does not belong to {address}");
+            continue;
         }
+        PUBKEYS.lock().unwrap().insert(address.to_string(), xy.clone());
+        return Ok(xy);
     }
-    Err(format!("could not fetch pubkey for {address}"))
+    Err(last)
 }
 
 fn fetch_asset(file_id: &str) -> Result<Value, String> {
