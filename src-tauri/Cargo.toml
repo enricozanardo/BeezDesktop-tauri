@@ -1,6 +1,6 @@
 [package]
 name = "beezdesktop"
-version = "0.2.0"
+version = "0.2.1"
 description = "Beez Desktop Two (SvelteKit + Tauri)"
 authors = ["Enrico Zanardo"]
 license = "AGPL-3.0-or-later"

@@ -971,9 +971,17 @@ nav a {
 	background: var(--bg-input);
 }
 
+.map-regions {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin-bottom: 0.5rem;
+}
+
 .world-map {
 	width: 100%;
 	height: auto;
+	max-height: 28rem;
 	display: block;
 	background: var(--bg-input);
 	border-radius: 10px;
@@ -986,7 +994,6 @@ nav a {
 
 .world-map .node-dot {
 	stroke: var(--bg);
-	stroke-width: 0.6;
 	cursor: pointer;
 }
 
@@ -1008,7 +1015,6 @@ nav a {
 
 .world-map .node-dot.selected {
 	stroke: var(--text);
-	stroke-width: 1.4;
 }
 
 .legend {
